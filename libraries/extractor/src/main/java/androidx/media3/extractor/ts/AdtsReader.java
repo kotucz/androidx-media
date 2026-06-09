@@ -15,7 +15,8 @@
  */
 package androidx.media3.extractor.ts;
 
-import static androidx.media3.common.util.Assertions.checkState;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.Math.min;
 
 import androidx.annotation.Nullable;
@@ -23,7 +24,6 @@ import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.ParsableBitArray;
 import androidx.media3.common.util.ParsableByteArray;
@@ -200,11 +200,6 @@ public final class AdtsReader implements ElementaryStreamReader {
           throw new IllegalStateException();
       }
     }
-  }
-
-  @Override
-  public void packetFinished(boolean isEndOfInput) {
-    // Do nothing.
   }
 
   /**
@@ -560,7 +555,7 @@ public final class AdtsReader implements ElementaryStreamReader {
 
   @EnsuresNonNull({"output", "currentOutput", "id3Output"})
   private void assertTracksCreated() {
-    Assertions.checkNotNull(output);
+    checkNotNull(output);
     Util.castNonNull(currentOutput);
     Util.castNonNull(id3Output);
   }

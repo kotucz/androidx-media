@@ -15,16 +15,16 @@
  */
 package androidx.media3.transformer;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
-import static androidx.media3.transformer.EditedMediaItemSequence.getRepeatedEditedMediaItem;
+import static androidx.media3.transformer.EditedMediaItemSequence.getEditedMediaItem;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import android.content.Context;
 import android.util.Pair;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Timeline;
+import androidx.media3.common.TrackSelectionParameters;
 import androidx.media3.exoplayer.ExoPlaybackException;
 import androidx.media3.exoplayer.RendererCapabilities;
 import androidx.media3.exoplayer.source.MediaSource;
@@ -45,17 +45,10 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
   private final TrackSelectorInternal trackSelectorInternal;
 
-  private @MonotonicNonNull EditedMediaItemSequence sequence;
   private @MonotonicNonNull EditedMediaItem currentEditedMediaItem;
 
-  public CompositionTrackSelector(
-      Context context, Listener listener, int sequenceIndex, boolean disableVideoPlayback) {
-    trackSelectorInternal =
-        new TrackSelectorInternal(context, listener, sequenceIndex, disableVideoPlayback);
-  }
-
-  public void setSequence(EditedMediaItemSequence sequence) {
-    this.sequence = sequence;
+  public CompositionTrackSelector(Context context, Listener listener, int sequenceIndex) {
+    trackSelectorInternal = new TrackSelectorInternal(context, listener, sequenceIndex);
   }
 
   @Override
@@ -71,10 +64,12 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       MediaSource.MediaPeriodId periodId,
       Timeline timeline)
       throws ExoPlaybackException {
+    Timeline.Period period = timeline.getPeriodByUid(periodId.periodUid, new Timeline.Period());
+    checkState(period.id instanceof EditedMediaItemSequence);
+    EditedMediaItemSequence sequence = (EditedMediaItemSequence) period.id;
     currentEditedMediaItem =
-        getRepeatedEditedMediaItem(
-            checkStateNotNull(sequence),
-            /* index= */ timeline.getIndexOfPeriod(periodId.periodUid));
+        getEditedMediaItem(sequence, /* index= */ timeline.getIndexOfPeriod(periodId.periodUid));
+
     return trackSelectorInternal.selectTracks(
         rendererCapabilities, trackGroups, periodId, timeline);
   }
@@ -84,23 +79,42 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     trackSelectorInternal.onSelectionActivated(info);
   }
 
+  @Override
+  public TrackSelectionParameters getParameters() {
+    return trackSelectorInternal.getParameters();
+  }
+
+  @Override
+  public void setParameters(TrackSelectionParameters parameters) {
+    trackSelectorInternal.setParameters(parameters);
+  }
+
+  @Override
+  public boolean isSetParametersSupported() {
+    return true;
+  }
+
+  @Override
+  public void release() {
+    trackSelectorInternal.release();
+    super.release();
+  }
+
   /**
    * A {@link DefaultTrackSelector} extension to de-select generated audio when the audio from the
    * media is playable.
    */
   private final class TrackSelectorInternal extends DefaultTrackSelector {
 
-    private static final String SILENCE_AUDIO_TRACK_GROUP_ID = "1:";
-    private final boolean disableVideoPlayback;
+    private static final String SILENCE_AUDIO_TRACK_GROUP_ID = "0:";
+    private static final String BLANK_IMAGE_TRACK_GROUP_ID = "1:";
     private final Listener listener;
     private final int sequenceIndex;
 
-    public TrackSelectorInternal(
-        Context context, Listener listener, int sequenceIndex, boolean disableVideoPlayback) {
+    public TrackSelectorInternal(Context context, Listener listener, int sequenceIndex) {
       super(context);
       this.sequenceIndex = sequenceIndex;
       this.listener = listener;
-      this.disableVideoPlayback = disableVideoPlayback;
     }
 
     @Nullable
@@ -157,8 +171,7 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
           if (shouldUseMediaAudio) {
             // Disable silence if the media's audio track is playable.
-            int silenceAudioTrackIndex = audioTrackGroups.length - 1;
-            rendererFormatSupports[audioRenderIndex][silenceAudioTrackIndex][0] =
+            rendererFormatSupports[audioRenderIndex][silenceAudioTrackGroupIndex][0] =
                 RendererCapabilities.create(C.FORMAT_UNSUPPORTED_TYPE);
           }
         }
@@ -186,9 +199,6 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
               mixedMimeTypeSupports,
               params,
               selectedAudioLanguage);
-      if (disableVideoPlayback) {
-        trackSelection = null;
-      }
       listener.onVideoTrackSelection(/* selected= */ trackSelection != null, sequenceIndex);
       return trackSelection;
     }
@@ -201,12 +211,45 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
         Parameters params)
         throws ExoPlaybackException {
 
+      int imageRenderIndex = C.INDEX_UNSET;
+      for (int i = 0; i < mappedTrackInfo.getRendererCount(); i++) {
+        if (mappedTrackInfo.getRendererType(i) == C.TRACK_TYPE_IMAGE) {
+          imageRenderIndex = i;
+          break;
+        }
+      }
+      checkState(imageRenderIndex != C.INDEX_UNSET);
+
+      TrackGroupArray imageTrackGroups = mappedTrackInfo.getTrackGroups(imageRenderIndex);
+      // If there's only one image TrackGroup, there's no need to override track selection
+      if (imageTrackGroups.length > 1) {
+        // Check if media image is playable.
+        boolean shouldUseMediaImage = false;
+        int blankImageTrackGroupIndex = C.INDEX_UNSET;
+        for (int i = 0; i < imageTrackGroups.length; i++) {
+          if (imageTrackGroups.get(i).id.startsWith(BLANK_IMAGE_TRACK_GROUP_ID)) {
+            blankImageTrackGroupIndex = i;
+            continue;
+          }
+          for (int j = 0; j < imageTrackGroups.get(i).length; j++) {
+            shouldUseMediaImage |=
+                RendererCapabilities.getFormatSupport(
+                        rendererFormatSupports[imageRenderIndex][i][j])
+                    == C.FORMAT_HANDLED;
+          }
+        }
+        checkState(blankImageTrackGroupIndex != C.INDEX_UNSET);
+
+        if (shouldUseMediaImage) {
+          // Disable blank images if the media's image track is playable.
+          rendererFormatSupports[imageRenderIndex][blankImageTrackGroupIndex][0] =
+              RendererCapabilities.create(C.FORMAT_UNSUPPORTED_TYPE);
+        }
+      }
+
       @Nullable
       Pair<ExoTrackSelection.Definition, Integer> trackSelection =
           super.selectImageTrack(mappedTrackInfo, rendererFormatSupports, params);
-      if (disableVideoPlayback) {
-        trackSelection = null;
-      }
       // Images are treated as video tracks.
       listener.onVideoTrackSelection(/* selected= */ trackSelection != null, sequenceIndex);
       return trackSelection;

@@ -16,8 +16,9 @@
 
 package androidx.media3.effect;
 
-import static androidx.media3.common.util.Assertions.checkState;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import android.content.Context;
 import android.graphics.Bitmap;
@@ -51,11 +52,11 @@ public class SingleInputVideoGraph implements VideoGraph {
   private final Listener listener;
   private final DebugViewProvider debugViewProvider;
   private final Executor listenerExecutor;
-  private final List<Effect> compositionEffects;
   private final boolean renderFramesAutomatically;
 
   @Nullable private VideoFrameProcessor videoFrameProcessor;
   @Nullable private SurfaceInfo outputSurfaceInfo;
+  private ImmutableList<Effect> compositionEffects;
   private boolean released;
   private volatile boolean hasProducedFrameWithTimestampZero;
   private int inputIndex;
@@ -83,8 +84,6 @@ public class SingleInputVideoGraph implements VideoGraph {
         DebugViewProvider debugViewProvider,
         Listener listener,
         Executor listenerExecutor,
-        VideoCompositorSettings videoCompositorSettings,
-        List<Effect> compositionEffects,
         long initialTimestampOffsetUs,
         boolean renderFramesAutomatically) {
       return new SingleInputVideoGraph(
@@ -92,10 +91,8 @@ public class SingleInputVideoGraph implements VideoGraph {
           videoFrameProcessorFactory,
           outputColorInfo,
           listener,
-          compositionEffects,
           debugViewProvider,
           listenerExecutor,
-          videoCompositorSettings,
           renderFramesAutomatically);
     }
 
@@ -115,22 +112,16 @@ public class SingleInputVideoGraph implements VideoGraph {
       VideoFrameProcessor.Factory videoFrameProcessorFactory,
       ColorInfo outputColorInfo,
       Listener listener,
-      List<Effect> compositionEffects,
       DebugViewProvider debugViewProvider,
       Executor listenerExecutor,
-      VideoCompositorSettings videoCompositorSettings,
       boolean renderFramesAutomatically) {
-    checkState(
-        VideoCompositorSettings.DEFAULT.equals(videoCompositorSettings),
-        "SingleInputVideoGraph does not use VideoCompositor, and therefore cannot apply"
-            + " VideoCompositorSettings");
     this.context = context;
     this.videoFrameProcessorFactory = videoFrameProcessorFactory;
     this.outputColorInfo = outputColorInfo;
     this.listener = listener;
     this.debugViewProvider = debugViewProvider;
     this.listenerExecutor = listenerExecutor;
-    this.compositionEffects = compositionEffects;
+    this.compositionEffects = ImmutableList.of();
     this.renderFramesAutomatically = renderFramesAutomatically;
     this.inputIndex = C.INDEX_UNSET;
   }
@@ -147,7 +138,7 @@ public class SingleInputVideoGraph implements VideoGraph {
 
   @Override
   public void registerInput(int inputIndex) throws VideoFrameProcessingException {
-    checkStateNotNull(videoFrameProcessor == null && !released);
+    checkState(videoFrameProcessor == null && !released);
     checkState(this.inputIndex == C.INDEX_UNSET, "This VideoGraph supports only one input.");
 
     this.inputIndex = inputIndex;
@@ -217,32 +208,32 @@ public class SingleInputVideoGraph implements VideoGraph {
   @Override
   public boolean queueInputBitmap(
       int inputIndex, Bitmap inputBitmap, TimestampIterator timestampIterator) {
-    checkStateNotNull(videoFrameProcessor);
+    checkNotNull(videoFrameProcessor);
     return videoFrameProcessor.queueInputBitmap(inputBitmap, timestampIterator);
   }
 
   @Override
   public boolean queueInputTexture(int inputIndex, int textureId, long presentationTimeUs) {
-    checkStateNotNull(videoFrameProcessor);
+    checkNotNull(videoFrameProcessor);
     return videoFrameProcessor.queueInputTexture(textureId, presentationTimeUs);
   }
 
   @Override
   public void setOnInputFrameProcessedListener(
       int inputIndex, OnInputFrameProcessedListener listener) {
-    checkStateNotNull(videoFrameProcessor);
+    checkNotNull(videoFrameProcessor);
     videoFrameProcessor.setOnInputFrameProcessedListener(listener);
   }
 
   @Override
   public void setOnInputSurfaceReadyListener(int inputIndex, Runnable listener) {
-    checkStateNotNull(videoFrameProcessor);
+    checkNotNull(videoFrameProcessor);
     videoFrameProcessor.setOnInputSurfaceReadyListener(listener);
   }
 
   @Override
   public Surface getInputSurface(int inputIndex) {
-    checkStateNotNull(videoFrameProcessor);
+    checkNotNull(videoFrameProcessor);
     return videoFrameProcessor.getInputSurface();
   }
 
@@ -253,7 +244,7 @@ public class SingleInputVideoGraph implements VideoGraph {
       Format format,
       List<Effect> effects,
       long offsetToAddUs) {
-    checkStateNotNull(videoFrameProcessor);
+    checkNotNull(videoFrameProcessor);
     videoFrameProcessor.registerInputStream(
         inputType,
         format,
@@ -262,37 +253,50 @@ public class SingleInputVideoGraph implements VideoGraph {
   }
 
   @Override
+  public void setCompositionEffects(List<Effect> compositionEffects) {
+    this.compositionEffects = ImmutableList.copyOf(compositionEffects);
+  }
+
+  @Override
+  public void setCompositorSettings(VideoCompositorSettings videoCompositorSettings) {
+    checkArgument(
+        videoCompositorSettings.equals(VideoCompositorSettings.DEFAULT),
+        "SingleInputVideoGraph does not use VideoCompositor, and therefore cannot apply"
+            + " VideoCompositorSettings");
+  }
+
+  @Override
   public boolean registerInputFrame(int inputIndex) {
-    checkStateNotNull(videoFrameProcessor);
+    checkNotNull(videoFrameProcessor);
     return videoFrameProcessor.registerInputFrame();
   }
 
   @Override
   public int getPendingInputFrameCount(int inputIndex) {
-    checkStateNotNull(videoFrameProcessor);
+    checkNotNull(videoFrameProcessor);
     return videoFrameProcessor.getPendingInputFrameCount();
   }
 
   @Override
   public void renderOutputFrame(long renderTimeNs) {
-    checkStateNotNull(videoFrameProcessor);
+    checkNotNull(videoFrameProcessor);
     videoFrameProcessor.renderOutputFrame(renderTimeNs);
   }
 
   @Override
   public void redraw() {
-    checkStateNotNull(videoFrameProcessor).redraw();
+    checkNotNull(videoFrameProcessor).redraw();
   }
 
   @Override
   public void flush() {
-    checkStateNotNull(videoFrameProcessor);
+    checkNotNull(videoFrameProcessor);
     videoFrameProcessor.flush();
   }
 
   @Override
   public void signalEndOfInput(int inputIndex) {
-    checkStateNotNull(videoFrameProcessor);
+    checkNotNull(videoFrameProcessor);
     videoFrameProcessor.signalEndOfInput();
   }
 

@@ -17,8 +17,8 @@
 package androidx.media3.transformer.mh;
 
 import static androidx.media3.common.util.Util.isRunningOnEmulator;
-import static androidx.media3.transformer.AndroidTestUtil.MP4_ASSET;
-import static androidx.media3.transformer.AndroidTestUtil.MP4_ASSET_WITH_INCREASING_TIMESTAMPS;
+import static androidx.media3.test.utils.AssetInfo.MP4_ADVANCED_ASSET;
+import static androidx.media3.test.utils.AssetInfo.MP4_ASSET_WITH_INCREASING_TIMESTAMPS;
 import static androidx.test.platform.app.InstrumentationRegistry.getInstrumentation;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assume.assumeTrue;
@@ -68,12 +68,13 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 /** Instrumentation tests for frame replaying (dynamic effect update). */
+@Ignore("Only intended to run on internal infra: b/396671260")
 @RunWith(AndroidJUnit4.class)
 public class ReplayCacheTest {
   private static final long TEST_TIMEOUT_MS = isRunningOnEmulator() ? 20_000 : 10_000;
 
-  private static final MediaItem VIDEO_MEDIA_ITEM_1 = MediaItem.fromUri(MP4_ASSET.uri);
-  private static final long VIDEO_MEDIA_ITEM_1_DURATION_US = MP4_ASSET.videoDurationUs;
+  private static final MediaItem VIDEO_MEDIA_ITEM_1 = MediaItem.fromUri(MP4_ADVANCED_ASSET.uri);
+  private static final long VIDEO_MEDIA_ITEM_1_DURATION_US = MP4_ADVANCED_ASSET.videoDurationUs;
   private static final MediaItem VIDEO_MEDIA_ITEM_2 =
       MediaItem.fromUri(MP4_ASSET_WITH_INCREASING_TIMESTAMPS.uri);
   private static final long VIDEO_MEDIA_ITEM_2_DURATION_US =
@@ -205,14 +206,14 @@ public class ReplayCacheTest {
               });
           compositionPlayer.setComposition(
               new Composition.Builder(
-                      new EditedMediaItemSequence.Builder(
+                      EditedMediaItemSequence.withAudioAndVideoFrom(
+                          ImmutableList.of(
                               new EditedMediaItem.Builder(VIDEO_MEDIA_ITEM_1)
                                   .setDurationUs(VIDEO_MEDIA_ITEM_1_DURATION_US)
                                   .build(),
                               new EditedMediaItem.Builder(VIDEO_MEDIA_ITEM_2)
                                   .setDurationUs(VIDEO_MEDIA_ITEM_2_DURATION_US)
-                                  .build())
-                          .build())
+                                  .build())))
                   .setEffects(
                       new Effects(
                           /* audioProcessors= */ ImmutableList.of(),
@@ -255,14 +256,14 @@ public class ReplayCacheTest {
           compositionPlayer.addListener(playerTestListener);
           compositionPlayer.setComposition(
               new Composition.Builder(
-                      new EditedMediaItemSequence.Builder(
+                      EditedMediaItemSequence.withAudioAndVideoFrom(
+                          ImmutableList.of(
                               new EditedMediaItem.Builder(VIDEO_MEDIA_ITEM_1)
                                   .setDurationUs(VIDEO_MEDIA_ITEM_1_DURATION_US)
                                   .build(),
                               new EditedMediaItem.Builder(VIDEO_MEDIA_ITEM_2)
                                   .setDurationUs(VIDEO_MEDIA_ITEM_2_DURATION_US)
-                                  .build())
-                          .build())
+                                  .build())))
                   .setEffects(
                       new Effects(
                           /* audioProcessors= */ ImmutableList.of(),

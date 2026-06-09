@@ -43,6 +43,7 @@ import java.util.concurrent.Executor;
  * A Service that creates {@link MediaBrowserCompat} and calls its methods according to the service
  * app's requests.
  */
+@SuppressWarnings("deprecation") // Test utils for deprecated MediaBrowserCompat
 public class MediaBrowserCompatProviderService extends Service {
 
   private static final String TAG = "MBCompatProviderService";
@@ -185,7 +186,7 @@ public class MediaBrowserCompatProviderService extends Service {
     public void sendCustomAction(String browserId, String action, Bundle extras)
         throws RemoteException {
       MediaBrowserCompat browser = mediaBrowserCompatMap.get(browserId);
-      browser.sendCustomAction(action, extras, /* customActionCallback= */ null);
+      browser.sendCustomAction(action, extras, /* callback= */ null);
     }
   }
 

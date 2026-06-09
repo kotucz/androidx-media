@@ -16,7 +16,9 @@
 package androidx.media3.exoplayer.drm;
 
 import static android.os.Build.VERSION.SDK_INT;
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import android.annotation.SuppressLint;
 import android.media.DeniedByServerException;
@@ -35,8 +37,8 @@ import androidx.annotation.RequiresApi;
 import androidx.media3.common.C;
 import androidx.media3.common.DrmInitData;
 import androidx.media3.common.DrmInitData.SchemeData;
+import androidx.media3.common.MediaLibraryInfo;
 import androidx.media3.common.MimeTypes;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.common.util.UnstableApi;
@@ -112,8 +114,8 @@ public final class FrameworkMediaDrm implements ExoMediaDrm {
   }
 
   private FrameworkMediaDrm(UUID uuid) throws UnsupportedSchemeException {
-    Assertions.checkNotNull(uuid);
-    Assertions.checkArgument(!C.COMMON_PSSH_UUID.equals(uuid), "Use C.CLEARKEY_UUID instead");
+    checkNotNull(uuid);
+    checkArgument(!C.COMMON_PSSH_UUID.equals(uuid), "Use C.CLEARKEY_UUID instead");
     this.uuid = uuid;
     this.mediaDrm = new MediaDrm(adjustUuid(uuid));
     // Creators of an instance automatically acquire ownership of the created instance.
@@ -133,21 +135,10 @@ public final class FrameworkMediaDrm implements ExoMediaDrm {
                 listener.onEvent(FrameworkMediaDrm.this, sessionId, event, extra, data));
   }
 
-  /**
-   * {@inheritDoc}
-   *
-   * @param listener The listener to receive events, or {@code null} to stop receiving events.
-   * @throws UnsupportedOperationException on API levels lower than 23.
-   */
   @UnstableApi
   @Override
-  @RequiresApi(23)
   public void setOnKeyStatusChangeListener(
       @Nullable ExoMediaDrm.OnKeyStatusChangeListener listener) {
-    if (SDK_INT < 23) {
-      throw new UnsupportedOperationException();
-    }
-
     mediaDrm.setOnKeyStatusChangeListener(
         listener == null
             ? null
@@ -162,20 +153,9 @@ public final class FrameworkMediaDrm implements ExoMediaDrm {
         /* handler= */ null);
   }
 
-  /**
-   * {@inheritDoc}
-   *
-   * @param listener The listener to receive events, or {@code null} to stop receiving events.
-   * @throws UnsupportedOperationException on API levels lower than 23.
-   */
   @UnstableApi
   @Override
-  @RequiresApi(23)
   public void setOnExpirationUpdateListener(@Nullable OnExpirationUpdateListener listener) {
-    if (SDK_INT < 23) {
-      throw new UnsupportedOperationException();
-    }
-
     mediaDrm.setOnExpirationUpdateListener(
         listener == null
             ? null
@@ -223,7 +203,7 @@ public final class FrameworkMediaDrm implements ExoMediaDrm {
     String mimeType = null;
     if (schemeDatas != null) {
       schemeData = getSchemeData(uuid, schemeDatas);
-      initData = adjustRequestInitData(uuid, Assertions.checkNotNull(schemeData.data));
+      initData = adjustRequestInitData(uuid, checkNotNull(schemeData.data));
       mimeType = adjustRequestMimeType(uuid, schemeData.mimeType);
     }
     MediaDrm.KeyRequest request =
@@ -237,9 +217,7 @@ public final class FrameworkMediaDrm implements ExoMediaDrm {
       licenseServerUrl = schemeData.licenseServerUrl;
     }
 
-    @KeyRequest.RequestType
-    int requestType = SDK_INT >= 23 ? request.getRequestType() : KeyRequest.REQUEST_TYPE_UNKNOWN;
-
+    @KeyRequest.RequestType int requestType = request.getRequestType();
     return new KeyRequest(requestData, licenseServerUrl, requestType);
   }
 
@@ -318,7 +296,7 @@ public final class FrameworkMediaDrm implements ExoMediaDrm {
   @UnstableApi
   @Override
   public synchronized void acquire() {
-    Assertions.checkState(referenceCount > 0);
+    checkState(referenceCount > 0);
     referenceCount++;
   }
 
@@ -408,8 +386,12 @@ public final class FrameworkMediaDrm implements ExoMediaDrm {
    */
   @RequiresApi(31)
   private boolean isMediaDrmRequiresSecureDecoderImplemented() {
-    // TODO: b/359768062 - Add an SDK_INT guard clause once WV 16.0 is not permitted on any device.
     if (uuid.equals(C.WIDEVINE_UUID)) {
+      // All devices with SDK_INT >= 37 must have a Widevine plugin version of 17.* or higher:
+      // b/359768062#comment5
+      if (SDK_INT >= 37) {
+        return true;
+      }
       String pluginVersion = getPropertyString(MediaDrm.PROPERTY_VERSION);
       return !pluginVersion.startsWith("v5.")
           && !pluginVersion.startsWith("14.")
@@ -435,7 +417,7 @@ public final class FrameworkMediaDrm implements ExoMediaDrm {
       boolean canConcatenateData = true;
       for (int i = 0; i < schemeDatas.size(); i++) {
         SchemeData schemeData = schemeDatas.get(i);
-        byte[] schemeDataData = Assertions.checkNotNull(schemeData.data);
+        byte[] schemeDataData = checkNotNull(schemeData.data);
         if (Objects.equals(schemeData.mimeType, firstSchemeData.mimeType)
             && Objects.equals(schemeData.licenseServerUrl, firstSchemeData.licenseServerUrl)
             && PsshAtomUtil.isPsshAtom(schemeDataData)) {
@@ -450,7 +432,7 @@ public final class FrameworkMediaDrm implements ExoMediaDrm {
         int concatenatedDataPosition = 0;
         for (int i = 0; i < schemeDatas.size(); i++) {
           SchemeData schemeData = schemeDatas.get(i);
-          byte[] schemeDataData = Assertions.checkNotNull(schemeData.data);
+          byte[] schemeDataData = checkNotNull(schemeData.data);
           int schemeDataLength = schemeDataData.length;
           System.arraycopy(
               schemeDataData, 0, concatenatedData, concatenatedDataPosition, schemeDataLength);
@@ -460,14 +442,11 @@ public final class FrameworkMediaDrm implements ExoMediaDrm {
       }
     }
 
-    // For API levels 23 - 27, prefer the first V1 PSSH box. For API levels 22 and earlier, prefer
-    // the first V0 box.
+    // For API levels 23 - 27, prefer the first V1 PSSH box.
     for (int i = 0; i < schemeDatas.size(); i++) {
       SchemeData schemeData = schemeDatas.get(i);
-      int version = PsshAtomUtil.parseVersion(Assertions.checkNotNull(schemeData.data));
-      if (SDK_INT < 23 && version == 0) {
-        return schemeData;
-      } else if (SDK_INT >= 23 && version == 1) {
+      int version = PsshAtomUtil.parseVersion(checkNotNull(schemeData.data));
+      if (version == 1) {
         return schemeData;
       }
     }
@@ -500,15 +479,9 @@ public final class FrameworkMediaDrm implements ExoMediaDrm {
       }
     }
 
-    // Prior to API level 21, the Widevine CDM required scheme specific data to be extracted from
-    // the PSSH atom. We also extract the data on API levels 21 and 22 because these API levels
-    // don't handle V1 PSSH atoms, but do handle scheme specific data regardless of whether it's
-    // extracted from a V0 or a V1 PSSH atom. Hence extracting the data allows us to support content
-    // that only provides V1 PSSH atoms. API levels 23 and above understand V0 and V1 PSSH atoms,
-    // and so we do not extract the data.
-    // Some Amazon devices also require data to be extracted from the PSSH atom for PlayReady.
-    if ((SDK_INT < 23 && C.WIDEVINE_UUID.equals(uuid))
-        || (C.PLAYREADY_UUID.equals(uuid)
+    // Some Amazon devices require data to be extracted from the PSSH atom for PlayReady.
+    if (MediaLibraryInfo.enableWorkarounds()
+        && (C.PLAYREADY_UUID.equals(uuid)
             && "Amazon".equals(Build.MANUFACTURER)
             && ("AFTB".equals(Build.MODEL) // Fire TV Gen 1
                 || "AFTS".equals(Build.MODEL) // Fire TV Gen 2
@@ -555,7 +528,7 @@ public final class FrameworkMediaDrm implements ExoMediaDrm {
    * <p>See <a href="https://github.com/google/ExoPlayer/issues/4413">GitHub issue #4413</a>.
    */
   private static boolean needsForceWidevineL3Workaround() {
-    return "ASUS_Z00AD".equals(Build.MODEL);
+    return MediaLibraryInfo.enableWorkarounds() && "ASUS_Z00AD".equals(Build.MODEL);
   }
 
   /**

@@ -31,6 +31,7 @@ import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.Player;
 import androidx.media3.session.MediaLibraryService.LibraryParams;
 import androidx.media3.session.MediaLibraryService.MediaLibrarySession;
+import androidx.media3.session.MediaSession.ConnectionResult;
 import androidx.media3.session.MediaSession.ControllerInfo;
 import androidx.media3.test.session.common.HandlerThreadTestRule;
 import androidx.media3.test.session.common.MainLooperTestRule;
@@ -44,6 +45,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Before;
@@ -85,26 +87,27 @@ public class MediaLibrarySessionCallbackTest {
   }
 
   @Test
-  public void onConnect_withMaxCommandsForMediaItems_correctMaxLimitInControllerInfo()
+  public void onConnectAsync_withMaxCommandsForMediaItems_correctMaxLimitInControllerInfo()
       throws Exception {
     CountDownLatch latch = new CountDownLatch(/* count= */ 1);
     AtomicInteger maxCommandsForMediaItems = new AtomicInteger();
     MediaLibrarySession.Callback sessionCallback =
         new MediaLibrarySession.Callback() {
           @Override
-          public MediaSession.ConnectionResult onConnect(
+          public ListenableFuture<ConnectionResult> onConnectAsync(
               MediaSession session, ControllerInfo browser) {
             maxCommandsForMediaItems.set(browser.getMaxCommandsForMediaItems());
             latch.countDown();
-            return MediaLibrarySession.Callback.super.onConnect(session, browser);
+            return MediaLibrarySession.Callback.super.onConnectAsync(session, browser);
           }
         };
-    MockMediaLibraryService service = new MockMediaLibraryService();
+    MockMediaLibraryService service =
+        threadTestRule.getHandler().postAndSync(MockMediaLibraryService::new);
     service.attachBaseContext(context);
     MediaLibrarySession session =
         sessionTestRule.ensureReleaseAfterTest(
             new MediaLibrarySession.Builder(service, player, sessionCallback)
-                .setId("onConnect_withMaxCommandForMediaItems_correctMaxLimitInControllerInfo")
+                .setId("onConnectAsync_withMaxCommandForMediaItems_correctMaxLimitInControllerInfo")
                 .build());
     Bundle connectionHints = new Bundle();
     connectionHints.putInt(
@@ -148,7 +151,8 @@ public class MediaLibrarySessionCallbackTest {
             return Futures.immediateFuture(LibraryResult.ofVoid());
           }
         };
-    MockMediaLibraryService service = new MockMediaLibraryService();
+    MockMediaLibraryService service =
+        threadTestRule.getHandler().postAndSync(MockMediaLibraryService::new);
     service.attachBaseContext(context);
     MediaLibrarySession session =
         sessionTestRule.ensureReleaseAfterTest(
@@ -203,7 +207,8 @@ public class MediaLibrarySessionCallbackTest {
             return Futures.immediateFuture(LibraryResult.ofError(ERROR_NOT_SUPPORTED));
           }
         };
-    MockMediaLibraryService service = new MockMediaLibraryService();
+    MockMediaLibraryService service =
+        threadTestRule.getHandler().postAndSync(MockMediaLibraryService::new);
     service.attachBaseContext(context);
     MediaLibrarySession session =
         sessionTestRule.ensureReleaseAfterTest(
@@ -236,7 +241,8 @@ public class MediaLibrarySessionCallbackTest {
   public void onSubscribe_onGetItemNotImplemented_errorNotSupported() throws Exception {
     String testParentId = SUBSCRIBE_PARENT_ID_1;
     LibraryParams testParams = MediaTestUtils.createLibraryParams();
-    MockMediaLibraryService service = new MockMediaLibraryService();
+    MockMediaLibraryService service =
+        threadTestRule.getHandler().postAndSync(MockMediaLibraryService::new);
     service.attachBaseContext(context);
     MediaLibrarySession session =
         sessionTestRule.ensureReleaseAfterTest(
@@ -256,7 +262,8 @@ public class MediaLibrarySessionCallbackTest {
   @Test
   public void onSubscribe_onGetItemNotSucceeded_correctErrorCodeReported() throws Exception {
     LibraryParams testParams = MediaTestUtils.createLibraryParams();
-    MockMediaLibraryService service = new MockMediaLibraryService();
+    MockMediaLibraryService service =
+        threadTestRule.getHandler().postAndSync(MockMediaLibraryService::new);
     service.attachBaseContext(context);
     MediaLibrarySession session =
         sessionTestRule.ensureReleaseAfterTest(
@@ -301,7 +308,8 @@ public class MediaLibrarySessionCallbackTest {
           }
         };
 
-    MockMediaLibraryService service = new MockMediaLibraryService();
+    MockMediaLibraryService service =
+        threadTestRule.getHandler().postAndSync(MockMediaLibraryService::new);
     service.attachBaseContext(context);
 
     MediaLibrarySession session =
@@ -328,7 +336,8 @@ public class MediaLibrarySessionCallbackTest {
             .setMediaMetadata(
                 new MediaMetadata.Builder().setIsPlayable(false).setIsBrowsable(true).build())
             .build();
-    MockMediaLibraryService service = new MockMediaLibraryService();
+    MockMediaLibraryService service =
+        threadTestRule.getHandler().postAndSync(MockMediaLibraryService::new);
     service.attachBaseContext(context);
     CountDownLatch latch = new CountDownLatch(1);
     MediaLibrarySession.Callback callback =
@@ -358,17 +367,22 @@ public class MediaLibrarySessionCallbackTest {
   }
 
   @Test
-  public void onGetChildren_systemUiCallForRecentItemsWhenIdle_callsOnPlaybackResumption()
-      throws Exception {
-    ArrayList<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
-    MockMediaLibraryService service = new MockMediaLibraryService();
+  public void
+      onGetChildren_systemUiCallForRecentItemsWhenIdle_callsOnPlaybackResumptionWithForPlaybackFalse()
+          throws Exception {
+    ArrayList<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ false);
+    MockMediaLibraryService service =
+        threadTestRule.getHandler().postAndSync(MockMediaLibraryService::new);
     service.attachBaseContext(context);
     CountDownLatch latch = new CountDownLatch(2);
+    AtomicBoolean isForPlaybackParameter = new AtomicBoolean();
     MediaLibrarySession.Callback callback =
         new MediaLibrarySession.Callback() {
           @Override
           public ListenableFuture<MediaSession.MediaItemsWithStartPosition> onPlaybackResumption(
-              MediaSession mediaSession, ControllerInfo controller) {
+              MediaSession mediaSession, ControllerInfo controller, boolean isForPlayback) {
+            isForPlaybackParameter.set(isForPlayback);
             latch.countDown();
             return Futures.immediateFuture(
                 new MediaSession.MediaItemsWithStartPosition(
@@ -411,20 +425,22 @@ public class MediaLibrarySessionCallbackTest {
     assertThat(Lists.transform(recentItem.value, (item) -> item.mediaId))
         .containsExactly("mediaItem_2");
     assertThat(children.value).isEqualTo(mediaItems);
+    assertThat(isForPlaybackParameter.get()).isFalse();
   }
 
   @Test
   public void
       onGetChildren_systemUiCallForRecentItemsWhenIdleWithEmptyResumptionPlaylist_resultInvalidState()
           throws Exception {
-    MockMediaLibraryService service = new MockMediaLibraryService();
+    MockMediaLibraryService service =
+        threadTestRule.getHandler().postAndSync(MockMediaLibraryService::new);
     service.attachBaseContext(context);
     CountDownLatch latch = new CountDownLatch(1);
     MediaLibrarySession.Callback callback =
         new MediaLibrarySession.Callback() {
           @Override
           public ListenableFuture<MediaSession.MediaItemsWithStartPosition> onPlaybackResumption(
-              MediaSession mediaSession, ControllerInfo controller) {
+              MediaSession mediaSession, ControllerInfo controller, boolean isForPlayback) {
             latch.countDown();
             return Futures.immediateFuture(
                 new MediaSession.MediaItemsWithStartPosition(
@@ -454,15 +470,17 @@ public class MediaLibrarySessionCallbackTest {
   public void
       onGetChildren_systemUiCallForRecentItemsWhenIdleStartIndexTooHigh_setToLastItemItemInList()
           throws Exception {
-    ArrayList<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
-    MockMediaLibraryService service = new MockMediaLibraryService();
+    ArrayList<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true);
+    MockMediaLibraryService service =
+        threadTestRule.getHandler().postAndSync(MockMediaLibraryService::new);
     service.attachBaseContext(context);
     CountDownLatch latch = new CountDownLatch(1);
     MediaLibrarySession.Callback callback =
         new MediaLibrarySession.Callback() {
           @Override
           public ListenableFuture<MediaSession.MediaItemsWithStartPosition> onPlaybackResumption(
-              MediaSession mediaSession, ControllerInfo controller) {
+              MediaSession mediaSession, ControllerInfo controller, boolean isForPlayback) {
             latch.countDown();
             return Futures.immediateFuture(
                 new MediaSession.MediaItemsWithStartPosition(
@@ -493,15 +511,17 @@ public class MediaLibrarySessionCallbackTest {
   @Test
   public void onGetChildren_systemUiCallForRecentItemsWhenIdleStartIndexNegative_setToZero()
       throws Exception {
-    ArrayList<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
-    MockMediaLibraryService service = new MockMediaLibraryService();
+    ArrayList<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true);
+    MockMediaLibraryService service =
+        threadTestRule.getHandler().postAndSync(MockMediaLibraryService::new);
     service.attachBaseContext(context);
     CountDownLatch latch = new CountDownLatch(1);
     MediaLibrarySession.Callback callback =
         new MediaLibrarySession.Callback() {
           @Override
           public ListenableFuture<MediaSession.MediaItemsWithStartPosition> onPlaybackResumption(
-              MediaSession mediaSession, ControllerInfo controller) {
+              MediaSession mediaSession, ControllerInfo controller, boolean isForPlayback) {
             latch.countDown();
             return Futures.immediateFuture(
                 new MediaSession.MediaItemsWithStartPosition(
@@ -532,8 +552,10 @@ public class MediaLibrarySessionCallbackTest {
   @Test
   public void onGetChildren_systemUiCallForRecentItemsWhenNotIdle_returnsRecentItems()
       throws Exception {
-    ArrayList<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
-    MockMediaLibraryService service = new MockMediaLibraryService();
+    ArrayList<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ false);
+    MockMediaLibraryService service =
+        threadTestRule.getHandler().postAndSync(MockMediaLibraryService::new);
     service.attachBaseContext(context);
     CountDownLatch latch = new CountDownLatch(1);
     MediaLibrarySession.Callback callback =

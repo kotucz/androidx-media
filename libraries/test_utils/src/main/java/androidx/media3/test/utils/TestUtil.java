@@ -16,9 +16,9 @@
 package androidx.media3.test.utils;
 
 import static android.os.Build.VERSION.SDK_INT;
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
 import static androidx.media3.common.util.Util.putInt24;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.truth.Truth.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -39,9 +39,11 @@ import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaMetadata;
+import androidx.media3.common.Player;
 import androidx.media3.common.StreamKey;
 import androidx.media3.common.Timeline;
 import androidx.media3.common.TrackGroup;
+import androidx.media3.common.audio.AudioProcessor;
 import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
@@ -50,7 +52,7 @@ import androidx.media3.database.DefaultDatabaseProvider;
 import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DataSourceUtil;
 import androidx.media3.datasource.DataSpec;
-import androidx.media3.exoplayer.MetadataRetriever;
+import androidx.media3.exoplayer.audio.TeeAudioProcessor;
 import androidx.media3.exoplayer.source.TrackGroupArray;
 import androidx.media3.extractor.DefaultExtractorInput;
 import androidx.media3.extractor.Extractor;
@@ -58,6 +60,7 @@ import androidx.media3.extractor.ExtractorInput;
 import androidx.media3.extractor.PositionHolder;
 import androidx.media3.extractor.SeekMap;
 import androidx.media3.extractor.metadata.MetadataInputBuffer;
+import androidx.media3.inspector.MetadataRetriever;
 import androidx.test.platform.app.InstrumentationRegistry;
 import com.google.common.base.Function;
 import com.google.common.collect.BoundType;
@@ -96,6 +99,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import org.junit.function.ThrowingRunnable;
@@ -144,6 +148,15 @@ public class TestUtil {
   public static byte[] buildTestData(int length, Random random) {
     byte[] source = new byte[length];
     random.nextBytes(source);
+    return source;
+  }
+
+  /** Returns an array of random floats between {@code [-1; 1]} with the specified length. */
+  public static float[] buildFloatTestSamples(int length, Random random) {
+    float[] source = new float[length];
+    for (int i = 0; i < length; i++) {
+      source[i] = (random.nextFloat() * 2f) - 1f;
+    }
     return source;
   }
 
@@ -227,9 +240,24 @@ public class TestUtil {
   }
 
   /** Creates a {@link ByteBuffer} containing the {@code data}. */
+  public static ByteBuffer createByteBuffer(double[] data) {
+    ByteBuffer buffer =
+        ByteBuffer.allocateDirect(data.length * Double.SIZE / 8).order(ByteOrder.nativeOrder());
+    buffer.asDoubleBuffer().put(data);
+    return buffer;
+  }
+
+  /** Creates a {@link ByteBuffer} containing the {@code data}. */
   public static ByteBuffer createByteBuffer(int[] data) {
     ByteBuffer buffer = ByteBuffer.allocateDirect(data.length * 4).order(ByteOrder.nativeOrder());
     buffer.asIntBuffer().put(data);
+    return buffer;
+  }
+
+  /** Creates a {@link ByteBuffer} containing the {@code data}. */
+  public static ByteBuffer createByteBuffer(long[] data) {
+    ByteBuffer buffer = ByteBuffer.allocateDirect(data.length * 8).order(ByteOrder.nativeOrder());
+    buffer.asLongBuffer().put(data);
     return buffer;
   }
 
@@ -312,7 +340,10 @@ public class TestUtil {
     return Util.fromUtf8Bytes(getByteArray(context, fileName));
   }
 
-  /** Returns a {@link DatabaseProvider} that provides an in-memory database. */
+  /**
+   * @deprecated Use {@link InMemoryDatabaseRule}.
+   */
+  @Deprecated
   public static DatabaseProvider getInMemoryDatabaseProvider() {
     return new DefaultDatabaseProvider(
         new SQLiteOpenHelper(
@@ -425,10 +456,13 @@ public class TestUtil {
     for (int i = 0; i < firstBitmap.getWidth(); i++) {
       for (int j = 0; j < firstBitmap.getHeight(); j++) {
         int firstColorInt = firstBitmap.getPixel(i, j);
+        int secondColorInt = secondBitmap.getPixel(i, j);
+        if (Color.alpha(firstColorInt) == 0 && Color.alpha(secondColorInt) == 0) {
+          continue;
+        }
         int firstRed = Color.red(firstColorInt);
         int firstGreen = Color.green(firstColorInt);
         int firstBlue = Color.blue(firstColorInt);
-        int secondColorInt = secondBitmap.getPixel(i, j);
         int secondRed = Color.red(secondColorInt);
         int secondGreen = Color.green(secondColorInt);
         int secondBlue = Color.blue(secondColorInt);
@@ -465,13 +499,16 @@ public class TestUtil {
       Context context, String fileUri, @C.TrackType int trackType)
       throws ExecutionException, InterruptedException {
     checkState(new File(fileUri).length() > 0);
-    TrackGroupArray trackGroupArray;
-    trackGroupArray = MetadataRetriever.retrieveMetadata(context, MediaItem.fromUri(fileUri)).get();
-    for (int i = 0; i < trackGroupArray.length; i++) {
-      TrackGroup trackGroup = trackGroupArray.get(i);
-      if (trackGroup.type == trackType) {
-        checkState(trackGroup.length == 1);
-        return trackGroup.getFormat(0);
+
+    try (MetadataRetriever retriever =
+        new MetadataRetriever.Builder(context, MediaItem.fromUri(fileUri)).build()) {
+      TrackGroupArray trackGroups = retriever.retrieveTrackGroups().get();
+      for (int i = 0; i < trackGroups.length; i++) {
+        TrackGroup trackGroup = trackGroups.get(i);
+        if (trackGroup.type == trackType) {
+          checkState(trackGroup.length == 1);
+          return trackGroup.getFormat(0);
+        }
       }
     }
     throw new IllegalStateException("Couldn't find track");
@@ -998,6 +1035,20 @@ public class TestUtil {
     return buffer;
   }
 
+  /** Returns an {@link AudioProcessor} that counts the number of bytes input to it. */
+  public static AudioProcessor createByteCountingAudioProcessor(AtomicInteger byteCount) {
+    return new TeeAudioProcessor(
+        new TeeAudioProcessor.AudioBufferSink() {
+          @Override
+          public void flush(int sampleRateHz, int channelCount, @C.PcmEncoding int encoding) {}
+
+          @Override
+          public void handleBuffer(ByteBuffer buffer) {
+            byteCount.addAndGet(buffer.remaining());
+          }
+        });
+  }
+
   /**
    * Creates a {@link SurfaceView} for tests where the creation is moved to the main thread if run
    * on a non-Looper thread. This is needed on API &lt; 26 where {@link SurfaceView} cannot be
@@ -1034,6 +1085,71 @@ public class TestUtil {
         }
       }
     }
+  }
+
+  /**
+   * Returns an {@link ImmutableList} with the {@linkplain Player.Event Events} contained in {@code
+   * events}. The contents of the list are in matching order with the {@linkplain Player.Event
+   * Events} returned by {@link Player.Events#get(int)}.
+   */
+  public static ImmutableList<@Player.Event Integer> getEventsAsList(Player.Events events) {
+    ImmutableList.Builder<@Player.Event Integer> list = new ImmutableList.Builder<>();
+    for (int i = 0; i < events.size(); i++) {
+      list.add(events.get(i));
+    }
+    return list.build();
+  }
+
+  /**
+   * Returns an {@link ImmutableList} with the {@linkplain Player.Command Commands} contained in
+   * {@code commands}. The contents of the list are in matching order with the {@linkplain
+   * Player.Command Commands} returned by {@link Player.Commands#get(int)}.
+   */
+  public static ImmutableList<@Player.Command Integer> getCommandsAsList(Player.Commands commands) {
+    ImmutableList.Builder<@Player.Command Integer> list = new ImmutableList.Builder<>();
+    for (int i = 0; i < commands.size(); i++) {
+      list.add(commands.get(i));
+    }
+    return list.build();
+  }
+
+  /**
+   * Creates a {@link File} {@code fileName} within the {@linkplain Context#getCacheDir() internal
+   * application cache directory}.
+   *
+   * <p>If a file of that name already exists, it is overwritten.
+   *
+   * @param context The {@link Context}.
+   * @param fileName The filename to save to the cache.
+   */
+  public static File createInternalCacheFile(Context context, String fileName) throws IOException {
+    return createFileInDirectory(context.getCacheDir(), fileName);
+  }
+
+  /**
+   * Creates a {@link File} {@code fileName} in a directory {@code directoryName} within the
+   * {@linkplain Context#getCacheDir() internal application cache directory}.
+   *
+   * <p>If a file of that name already exists, it is overwritten.
+   *
+   * @param context The {@link Context}.
+   * @param directoryName The directory name within the internal cache to save the file in.
+   * @param fileName The filename to save to the cache.
+   */
+  public static File createInternalCacheFile(Context context, String directoryName, String fileName)
+      throws IOException {
+    return createFileInDirectory(new File(context.getCacheDir(), directoryName), fileName);
+  }
+
+  private static File createFileInDirectory(File directory, String fileName) throws IOException {
+    if (!directory.exists()) {
+      checkState(directory.mkdirs(), "Unable to create directory: %s", directory.getAbsolutePath());
+    }
+    File file = new File(directory, fileName);
+    checkState(
+        !file.exists() || file.delete(), "Could not delete file: %s", file.getAbsolutePath());
+    checkState(file.createNewFile(), "Could not create file: %s", file.getAbsolutePath());
+    return file;
   }
 
   private static final class NoUidOrShufflingTimeline extends Timeline {

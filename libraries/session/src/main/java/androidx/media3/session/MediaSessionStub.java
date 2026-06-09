@@ -39,8 +39,7 @@ import static androidx.media3.common.Player.COMMAND_SET_TRACK_SELECTION_PARAMETE
 import static androidx.media3.common.Player.COMMAND_SET_VIDEO_SURFACE;
 import static androidx.media3.common.Player.COMMAND_SET_VOLUME;
 import static androidx.media3.common.Player.COMMAND_STOP;
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
+import static androidx.media3.common.util.Util.convertToNullIfInvalid;
 import static androidx.media3.common.util.Util.postOrRun;
 import static androidx.media3.common.util.Util.postOrRunWithCompletion;
 import static androidx.media3.common.util.Util.transformFutureAsync;
@@ -60,20 +59,32 @@ import static androidx.media3.session.SessionError.ERROR_PERMISSION_DENIED;
 import static androidx.media3.session.SessionError.ERROR_SESSION_DISCONNECTED;
 import static androidx.media3.session.SessionError.ERROR_UNKNOWN;
 import static androidx.media3.session.SessionError.INFO_CANCELLED;
+import static androidx.media3.session.SessionUtil.PACKAGE_INVALID;
+import static androidx.media3.session.SessionUtil.PACKAGE_VALID;
+import static androidx.media3.session.SessionUtil.checkPackageValidity;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import android.app.PendingIntent;
+import android.graphics.Canvas;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.media.session.MediaSession.Token;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.RemoteException;
 import android.text.TextUtils;
 import android.view.Surface;
+import android.view.SurfaceHolder;
 import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
 import androidx.core.util.ObjectsCompat;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.BundleListRetriever;
 import androidx.media3.common.C;
+import androidx.media3.common.Format;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaLibraryInfo;
 import androidx.media3.common.MediaMetadata;
@@ -85,7 +96,6 @@ import androidx.media3.common.TrackGroup;
 import androidx.media3.common.TrackSelectionOverride;
 import androidx.media3.common.TrackSelectionParameters;
 import androidx.media3.common.Tracks;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.BundleCollectionUtil;
 import androidx.media3.common.util.Consumer;
 import androidx.media3.common.util.Log;
@@ -99,17 +109,17 @@ import androidx.media3.session.SessionCommand.CommandCode;
 import androidx.media3.session.legacy.MediaSessionManager;
 import com.google.common.collect.ImmutableBiMap;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
 import java.lang.ref.WeakReference;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
-import java.util.Set;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.ExecutionException;
 
 /**
@@ -122,29 +132,28 @@ import java.util.concurrent.ExecutionException;
 
   private static final String TAG = "MediaSessionStub";
 
-  /** The version of the IMediaSession interface. */
-  public static final int VERSION_INT = 4;
-
   /**
-   * Sequence number used when a controller method is triggered on the sesison side that wasn't
+   * Sequence number used when a controller method is triggered on the session side that wasn't
    * initiated by the controller itself.
    */
   public static final int UNKNOWN_SEQUENCE_NUMBER = Integer.MIN_VALUE;
 
   private final WeakReference<MediaSessionImpl> sessionImpl;
   private final ConnectedControllersManager<IBinder> connectedControllersManager;
-  private final Set<ControllerInfo> pendingControllers;
+  private final CopyOnWriteArraySet<ControllerInfo> pendingControllers;
 
   private ImmutableBiMap<TrackGroup, String> trackGroupIdMap;
+  private ImmutableMap<String, String> trackGroupOriginalToUniqueIdMap;
   private int nextUniqueTrackGroupIdPrefix;
+  @Nullable private SurfaceHolderWithSize surfaceHolderWithSize;
 
   public MediaSessionStub(MediaSessionImpl sessionImpl) {
     // Initialize members with params.
     this.sessionImpl = new WeakReference<>(sessionImpl);
     connectedControllersManager = new ConnectedControllersManager<>(sessionImpl);
-    // ConcurrentHashMap has a bug in APIs 21-22 that can result in lost updates.
-    pendingControllers = Collections.synchronizedSet(new HashSet<>());
+    pendingControllers = new CopyOnWriteArraySet<>();
     trackGroupIdMap = ImmutableBiMap.of();
+    trackGroupOriginalToUniqueIdMap = ImmutableMap.of();
   }
 
   public ConnectedControllersManager<IBinder> getConnectedControllersManager() {
@@ -152,9 +161,16 @@ import java.util.concurrent.ExecutionException;
   }
 
   private static void sendSessionResult(
-      ControllerInfo controller, int sequenceNumber, SessionResult result) {
+      MediaSessionImpl sessionImpl,
+      ControllerInfo controller,
+      int sequenceNumber,
+      SessionResult result) {
     try {
-      checkStateNotNull(controller.getControllerCb()).onSessionResult(sequenceNumber, result);
+      checkNotNull(controller.getControllerCb()).onSessionResult(sequenceNumber, result);
+      // Make sure the session sends out a new PlayerInfo update in any case, even if the controller
+      // command we just handled didn't change anything. This is needed to end any masking states
+      // in the controllers waiting to acknowledge this command.
+      sessionImpl.triggerPlayerInfoUpdate();
     } catch (RemoteException e) {
       Log.w(TAG, "Failed to send result to controller " + controller, e);
     }
@@ -174,7 +190,7 @@ import java.util.concurrent.ExecutionException;
       }
       task.run(sessionImpl.getPlayerWrapper(), controller);
       sendSessionResult(
-          controller, sequenceNumber, new SessionResult(SessionResult.RESULT_SUCCESS));
+          sessionImpl, controller, sequenceNumber, new SessionResult(SessionResult.RESULT_SUCCESS));
       return Futures.immediateVoidFuture();
     };
   }
@@ -203,7 +219,7 @@ import java.util.concurrent.ExecutionException;
                             ? ERROR_NOT_SUPPORTED
                             : ERROR_UNKNOWN);
               }
-              sendSessionResult(controller, sequenceNumber, result);
+              sendSessionResult(sessionImpl, controller, sequenceNumber, result);
             });
   }
 
@@ -260,7 +276,7 @@ import java.util.concurrent.ExecutionException;
   private static void sendLibraryResult(
       ControllerInfo controller, int sequenceNumber, LibraryResult<?> result) {
     try {
-      checkStateNotNull(controller.getControllerCb()).onLibraryResult(sequenceNumber, result);
+      checkNotNull(controller.getControllerCb()).onLibraryResult(sequenceNumber, result);
     } catch (RemoteException e) {
       Log.w(TAG, "Failed to send result to browser " + controller, e);
     }
@@ -290,64 +306,93 @@ import java.util.concurrent.ExecutionException;
             });
   }
 
-  private <K extends MediaSessionImpl> void queueSessionTaskWithPlayerCommand(
-      IMediaController caller,
-      int sequenceNumber,
-      @Player.Command int command,
-      SessionTask<ListenableFuture<Void>, K> task) {
-    ControllerInfo controllerInfo = connectedControllersManager.getController(caller.asBinder());
-    if (controllerInfo != null) {
-      queueSessionTaskWithPlayerCommandForControllerInfo(
-          controllerInfo, sequenceNumber, command, task);
+  private void verifyApplicationThread() {
+    @Nullable MediaSessionImpl session = sessionImpl.get();
+    if (session != null) {
+      checkState(Looper.myLooper() == session.getApplicationHandler().getLooper());
     }
   }
 
-  private <K extends MediaSessionImpl> void queueSessionTaskWithPlayerCommandForControllerInfo(
+  private void postOrRunOnApplicationHandler(Runnable runnable) {
+    @Nullable MediaSessionImpl session = sessionImpl.get();
+    if (session != null) {
+      postOrRun(session.getApplicationHandler(), runnable);
+    }
+  }
+
+  private void queueSessionTaskWithPlayerCommand(
       ControllerInfo controller,
       int sequenceNumber,
       @Player.Command int command,
-      SessionTask<ListenableFuture<Void>, K> task) {
+      SessionTask<ListenableFuture<Void>, MediaSessionImpl> task) {
+    verifyApplicationThread();
+    @Nullable MediaSessionImpl sessionImpl = this.sessionImpl.get();
+    if (sessionImpl == null || sessionImpl.isReleased()) {
+      return;
+    }
+    if (!connectedControllersManager.isConnected(controller)) {
+      return;
+    }
+    if (!connectedControllersManager.isPlayerCommandAvailable(controller, command)) {
+      SessionResult deniedResult = new SessionResult(ERROR_PERMISSION_DENIED);
+      sendSessionResult(sessionImpl, controller, sequenceNumber, deniedResult);
+      return;
+    }
+    @SessionResult.Code
+    int resultCode = sessionImpl.onPlayerCommandRequestOnHandler(controller, command);
+    if (resultCode != SessionResult.RESULT_SUCCESS) {
+      // Don't run rejected command.
+      sendSessionResult(sessionImpl, controller, sequenceNumber, new SessionResult(resultCode));
+      return;
+    }
+    if (command == COMMAND_SET_VIDEO_SURFACE) {
+      // Call surface changes immediately to ensure they are handled within the calling
+      // methods stack. Also add a placeholder task to the regular command queue for proper
+      // task tracking (e.g. to send onPlayerInteractionFinished).
+      sessionImpl
+          .callWithControllerForCurrentRequestSet(
+              controller, () -> task.run(sessionImpl, controller, sequenceNumber))
+          .run();
+      connectedControllersManager.addToCommandQueue(
+          controller, command, Futures::immediateVoidFuture);
+    } else {
+      connectedControllersManager.addToCommandQueue(
+          controller, command, () -> task.run(sessionImpl, controller, sequenceNumber));
+    }
+  }
+
+  private void dispatchPlayerCommand(
+      IMediaController caller, int sequenceNumber, PlayerCommandTask task) {
     long token = Binder.clearCallingIdentity();
     try {
-      @SuppressWarnings({"unchecked", "cast.unsafe"})
-      @Nullable
-      K sessionImpl = (K) this.sessionImpl.get();
+      @Nullable MediaSessionImpl sessionImpl = this.sessionImpl.get();
       if (sessionImpl == null || sessionImpl.isReleased()) {
         return;
       }
-      postOrRun(
-          sessionImpl.getApplicationHandler(),
+      IBinder callerBinder = caller.asBinder();
+      postOrRunOnApplicationHandler(
           () -> {
-            if (!connectedControllersManager.isPlayerCommandAvailable(controller, command)) {
-              sendSessionResult(
-                  controller, sequenceNumber, new SessionResult(ERROR_PERMISSION_DENIED));
-              return;
-            }
-            @SessionResult.Code
-            int resultCode = sessionImpl.onPlayerCommandRequestOnHandler(controller, command);
-            if (resultCode != SessionResult.RESULT_SUCCESS) {
-              // Don't run rejected command.
-              sendSessionResult(controller, sequenceNumber, new SessionResult(resultCode));
-              return;
-            }
-            if (command == COMMAND_SET_VIDEO_SURFACE) {
-              // Call surface changes immediately to ensure they are handled within the calling
-              // methods stack. Also add a placeholder task to the regular command queue for proper
-              // task tracking (e.g. to send onPlayerInteractionFinished).
-              sessionImpl
-                  .callWithControllerForCurrentRequestSet(
-                      controller, () -> task.run(sessionImpl, controller, sequenceNumber))
-                  .run();
-              connectedControllersManager.addToCommandQueue(
-                  controller, command, Futures::immediateVoidFuture);
-            } else {
-              connectedControllersManager.addToCommandQueue(
-                  controller, command, () -> task.run(sessionImpl, controller, sequenceNumber));
+            @Nullable
+            ControllerInfo controller = connectedControllersManager.getController(callerBinder);
+            if (controller != null) {
+              task.run(controller, sequenceNumber);
             }
           });
     } finally {
       Binder.restoreCallingIdentity(token);
     }
+  }
+
+  private void dispatchAndQueueSessionTaskWithPlayerCommand(
+      IMediaController caller,
+      int sequenceNumber,
+      @Player.Command int command,
+      SessionTask<ListenableFuture<Void>, MediaSessionImpl> task) {
+    dispatchPlayerCommand(
+        caller,
+        sequenceNumber,
+        (controllerInfo, seq) ->
+            queueSessionTaskWithPlayerCommand(controllerInfo, seq, command, task));
   }
 
   private <K extends MediaSessionImpl> void dispatchSessionTaskWithSessionCommand(
@@ -382,28 +427,28 @@ import java.util.concurrent.ExecutionException;
       if (sessionImpl == null || sessionImpl.isReleased()) {
         return;
       }
-      @Nullable
-      ControllerInfo controller = connectedControllersManager.getController(caller.asBinder());
-      if (controller == null) {
-        return;
-      }
-      postOrRun(
-          sessionImpl.getApplicationHandler(),
+      IBinder callerBinder = caller.asBinder();
+      postOrRunOnApplicationHandler(
           () -> {
+            @Nullable
+            ControllerInfo controller = connectedControllersManager.getController(callerBinder);
+            if (controller == null) {
+              return;
+            }
             if (!connectedControllersManager.isConnected(controller)) {
               return;
             }
             if (sessionCommand != null) {
               if (!connectedControllersManager.isSessionCommandAvailable(
                   controller, sessionCommand)) {
-                sendSessionResult(
-                    controller, sequenceNumber, new SessionResult(ERROR_PERMISSION_DENIED));
+                SessionResult deniedResult = new SessionResult(ERROR_PERMISSION_DENIED);
+                sendSessionResult(sessionImpl, controller, sequenceNumber, deniedResult);
                 return;
               }
             } else {
               if (!connectedControllersManager.isSessionCommandAvailable(controller, commandCode)) {
-                sendSessionResult(
-                    controller, sequenceNumber, new SessionResult(ERROR_PERMISSION_DENIED));
+                SessionResult deniedResult = new SessionResult(ERROR_PERMISSION_DENIED);
+                sendSessionResult(sessionImpl, controller, sequenceNumber, deniedResult);
                 return;
               }
             }
@@ -459,172 +504,187 @@ import java.util.concurrent.ExecutionException;
   @SuppressWarnings("UngroupedOverloads") // Overload belongs to AIDL interface that is separated.
   public void connect(@Nullable IMediaController caller, @Nullable ControllerInfo controllerInfo) {
     if (caller == null || controllerInfo == null) {
+      SessionUtil.disconnectIMediaController(caller);
       return;
     }
     @Nullable MediaSessionImpl sessionImpl = this.sessionImpl.get();
     if (sessionImpl == null || sessionImpl.isReleased()) {
-      try {
-        caller.onDisconnected(/* seq= */ 0);
-      } catch (RemoteException e) {
-        // Controller may be died prematurely.
-        // Not an issue because we'll ignore it anyway.
-      }
+      SessionUtil.disconnectIMediaController(caller);
       return;
     }
     pendingControllers.add(controllerInfo);
+    // Use direct postOrRun with sessionImpl's handler instead of postOrRunOnApplicationHandler().
+    // postOrRunOnApplicationHandler() queries the session weak reference, which may concurrently
+    // clear during session release, causing the task to be silently skipped. Using direct postOrRun
+    // guarantees the connection task executes and purges pending controllers even after release.
     postOrRun(
         sessionImpl.getApplicationHandler(),
         () -> {
-          boolean connected = false;
-          try {
+          if (sessionImpl.isReleased()) {
             pendingControllers.remove(controllerInfo);
-            if (sessionImpl.isReleased()) {
-              return;
-            }
-            IBinder callbackBinder =
-                checkStateNotNull((Controller2Cb) controllerInfo.getControllerCb())
-                    .getCallbackBinder();
-            MediaSession.ConnectionResult connectionResult =
-                sessionImpl.onConnectOnHandler(controllerInfo);
-            // Don't reject connection for the request from trusted app.
-            // Otherwise server will fail to retrieve session's information to dispatch
-            // media keys to.
-            if (!connectionResult.isAccepted && !controllerInfo.isTrusted()) {
-              return;
-            }
-            if (!connectionResult.isAccepted) {
-              // For the accepted controller, send non-null allowed commands to keep connection.
-              connectionResult =
-                  MediaSession.ConnectionResult.accept(
-                      SessionCommands.EMPTY, Player.Commands.EMPTY);
-            }
-            SequencedFutureManager sequencedFutureManager;
-            if (connectedControllersManager.isConnected(controllerInfo)) {
-              Log.w(
-                  TAG,
-                  "Controller "
-                      + controllerInfo
-                      + " has sent connection"
-                      + " request multiple times");
-            }
-            connectedControllersManager.addController(
-                callbackBinder,
-                controllerInfo,
-                connectionResult.availableSessionCommands,
-                connectionResult.availablePlayerCommands);
-            sequencedFutureManager =
-                connectedControllersManager.getSequencedFutureManager(controllerInfo);
-            if (sequencedFutureManager == null) {
-              Log.w(TAG, "Ignoring connection request from unknown controller info");
-              return;
-            }
-            // If connection is accepted, notify the current state to the controller.
-            // It's needed because we cannot call synchronous calls between
-            // session/controller.
-            PlayerWrapper playerWrapper = sessionImpl.getPlayerWrapper();
-
-            Player.Commands controllerPlayerCommands;
-            PlayerInfo playerInfo = playerWrapper.createPlayerInfoForBundling();
-            @Nullable
-            PlaybackException sessionPlaybackException = sessionImpl.getPlaybackException();
-            if (sessionPlaybackException == null) {
-              controllerPlayerCommands = connectionResult.availablePlayerCommands;
-            } else {
-              connectedControllersManager.setPlaybackException(
-                  controllerInfo,
-                  sessionPlaybackException,
-                  connectionResult.availablePlayerCommands);
-              playerInfo =
-                  createPlayerInfoForCustomPlaybackException(playerInfo, sessionPlaybackException);
-              controllerPlayerCommands =
-                  checkNotNull(
-                      createPlayerCommandsForCustomErrorState(
-                          connectionResult.availablePlayerCommands));
-            }
-            playerInfo = generateAndCacheUniqueTrackGroupIds(playerInfo);
-            Token platformToken =
-                (Token) sessionImpl.getSessionCompat().getSessionToken().getToken();
-            ConnectionState state =
-                new ConnectionState(
-                    MediaLibraryInfo.VERSION_INT,
-                    MediaSessionStub.VERSION_INT,
-                    MediaSessionStub.this,
-                    connectionResult.sessionActivity != null
-                        ? connectionResult.sessionActivity
-                        : sessionImpl.getSessionActivity(),
-                    connectionResult.customLayout != null
-                        ? connectionResult.customLayout
-                        : sessionImpl.getCustomLayout(),
-                    connectionResult.mediaButtonPreferences != null
-                        ? connectionResult.mediaButtonPreferences
-                        : sessionImpl.getMediaButtonPreferences(),
-                    sessionImpl.getCommandButtonsForMediaItems(),
-                    connectionResult.availableSessionCommands,
-                    controllerPlayerCommands,
-                    playerWrapper.getAvailableCommands(),
-                    sessionImpl.getToken().getExtras(),
-                    connectionResult.sessionExtras != null
-                        ? connectionResult.sessionExtras
-                        : sessionImpl.getSessionExtras(),
-                    playerInfo,
-                    platformToken);
-
-            // Double check if session is still there, because release() can be called in
-            // another thread.
-            if (sessionImpl.isReleased()) {
-              return;
-            }
-            try {
-              caller.onConnected(
-                  sequencedFutureManager.obtainNextSequenceNumber(),
-                  caller instanceof MediaControllerStub
-                      ? state.toBundleInProcess()
-                      : state.toBundleForRemoteProcess(controllerInfo.getInterfaceVersion()));
-              connected = true;
-            } catch (RemoteException e) {
-              // Controller may be died prematurely.
-            }
-            if (connected) {
-              sessionImpl.onPostConnectOnHandler(controllerInfo);
-            }
-          } finally {
-            if (!connected) {
-              try {
-                caller.onDisconnected(/* seq= */ 0);
-              } catch (RemoteException e) {
-                // Controller may be died prematurely.
-                // Not an issue because we'll ignore it anyway.
-              }
-            }
+            SessionUtil.disconnectIMediaController(caller);
+            return;
           }
+          ListenableFuture<MediaSession.ConnectionResult> connectionResultFuture =
+              sessionImpl.onConnectOnHandler(controllerInfo);
+          Futures.addCallback(
+              connectionResultFuture,
+              new FutureCallback<MediaSession.ConnectionResult>() {
+                @Override
+                public void onSuccess(MediaSession.ConnectionResult connectionResult) {
+                  pendingControllers.remove(controllerInfo);
+                  boolean connected = false;
+                  try {
+                    if (sessionImpl.isReleased()) {
+                      return;
+                    }
+                    IBinder callbackBinder =
+                        checkNotNull((Controller2Cb) controllerInfo.getControllerCb())
+                            .getCallbackBinder();
+                    // Don't reject connection for trusted app.
+                    if (!connectionResult.isAccepted && !controllerInfo.isTrusted()) {
+                      return;
+                    }
+                    MediaSession.ConnectionResult connectionResultToUse = connectionResult;
+                    if (!connectionResult.isAccepted) {
+                      // Keep connection to rejected trusted controllers. Rejected controller
+                      // can keep the
+                      // connection without available commands. Otherwise, the server will
+                      // fail to retrieve
+                      // session's information to dispatch media keys too.
+                      connectionResultToUse =
+                          MediaSession.ConnectionResult.accept(
+                              SessionCommands.EMPTY, Player.Commands.EMPTY);
+                    }
+
+                    if (connectedControllersManager.isConnected(controllerInfo)) {
+                      Log.w(
+                          TAG,
+                          "Controller "
+                              + controllerInfo
+                              + " has sent connection"
+                              + " request multiple times");
+                    }
+                    connectedControllersManager.addController(
+                        callbackBinder,
+                        controllerInfo,
+                        connectionResultToUse.availableSessionCommands,
+                        connectionResultToUse.availablePlayerCommands);
+                    SequencedFutureManager sequencedFutureManager =
+                        connectedControllersManager.getSequencedFutureManager(controllerInfo);
+                    if (sequencedFutureManager == null) {
+                      Log.w(TAG, "Ignoring connection request from unknown controller info");
+                      return;
+                    }
+                    // If connection is accepted, notify the current state to the controller.
+                    // It's needed because we cannot call synchronous calls between
+                    // session/controller.
+                    PlayerWrapper playerWrapper = sessionImpl.getPlayerWrapper();
+                    Player.Commands controllerPlayerCommands;
+                    PlayerInfo playerInfo = sessionImpl.getPlayerInfo();
+                    @Nullable
+                    PlaybackException sessionPlaybackException = sessionImpl.getPlaybackException();
+                    if (sessionPlaybackException == null) {
+                      controllerPlayerCommands = connectionResultToUse.availablePlayerCommands;
+                    } else {
+                      connectedControllersManager.setPlaybackException(
+                          controllerInfo,
+                          sessionPlaybackException,
+                          connectionResultToUse.availablePlayerCommands);
+                      playerInfo =
+                          createPlayerInfoForCustomPlaybackException(
+                              playerInfo, sessionPlaybackException);
+                      controllerPlayerCommands =
+                          checkNotNull(
+                              createPlayerCommandsForCustomErrorState(
+                                  connectionResultToUse.availablePlayerCommands));
+                    }
+                    playerInfo = updatePlayerInfoWithUniqueTrackGroupIds(playerInfo);
+                    if (connectedControllersManager.isConnected(controllerInfo)) {
+                      connectedControllersManager.updateLastSentTimelineAndTracks(
+                          controllerInfo, playerInfo.timeline, playerInfo.currentTracks);
+                    }
+                    Token platformToken = sessionImpl.getPlatformToken();
+                    ConnectionState state =
+                        new ConnectionState(
+                            MediaLibraryInfo.VERSION_INT,
+                            MediaLibraryInfo.INTERFACE_VERSION,
+                            MediaSessionStub.this,
+                            connectionResultToUse.sessionActivity != null
+                                ? connectionResultToUse.sessionActivity
+                                : sessionImpl.getSessionActivity(),
+                            connectionResultToUse.customLayout != null
+                                ? connectionResultToUse.customLayout
+                                : sessionImpl.getCustomLayout(),
+                            connectionResultToUse.mediaButtonPreferences != null
+                                ? connectionResultToUse.mediaButtonPreferences
+                                : sessionImpl.getMediaButtonPreferences(),
+                            sessionImpl.getCommandButtonsForMediaItems(),
+                            connectionResultToUse.availableSessionCommands,
+                            controllerPlayerCommands,
+                            playerWrapper.getAvailableCommands(),
+                            sessionImpl.getToken().getExtras(),
+                            connectionResultToUse.sessionExtras != null
+                                ? connectionResultToUse.sessionExtras
+                                : sessionImpl.getSessionExtras(),
+                            playerInfo,
+                            platformToken,
+                            sessionImpl.getPackageNameOverride());
+
+                    // Double check if session is still there, because release() can be called
+                    // in another thread.
+                    if (sessionImpl.isReleased()) {
+                      return;
+                    }
+                    try {
+                      caller.onConnected(
+                          sequencedFutureManager.obtainNextSequenceNumber(),
+                          caller instanceof MediaControllerStub
+                              ? state.toBundleInProcess()
+                              : state.toBundleForRemoteProcess(
+                                  controllerInfo.getInterfaceVersion()));
+                      connected = true;
+                    } catch (RemoteException e) {
+                      // Controller may be died prematurely.
+                    }
+                    if (connected) {
+                      sessionImpl.onPostConnectOnHandler(controllerInfo);
+                    }
+                  } finally {
+                    if (!connected) {
+                      SessionUtil.disconnectIMediaController(caller);
+                    }
+                  }
+                }
+
+                @Override
+                public void onFailure(Throwable t) {
+                  pendingControllers.remove(controllerInfo);
+                  SessionUtil.disconnectIMediaController(caller);
+                }
+              },
+              this::postOrRunOnApplicationHandler);
         });
   }
 
   public void release() {
+    sessionImpl.clear();
+    connectedControllersManager.release();
     List<ControllerInfo> controllers = connectedControllersManager.getConnectedControllers();
     for (ControllerInfo controller : controllers) {
       connectedControllersManager.removeController(controller);
       ControllerCb cb = controller.getControllerCb();
       if (cb != null) {
-        try {
-          cb.onDisconnected(/* seq= */ 0);
-        } catch (RemoteException e) {
-          // Ignore. We're releasing.
-        }
+        cb.onDisconnected(/* seq= */ 0);
       }
     }
     for (ControllerInfo controller : pendingControllers) {
       ControllerCb cb = controller.getControllerCb();
       if (cb != null) {
-        try {
-          cb.onDisconnected(/* seq= */ 0);
-        } catch (RemoteException e) {
-          // Ignore. We're releasing.
-        }
+        cb.onDisconnected(/* seq= */ 0);
       }
     }
     pendingControllers.clear();
-    sessionImpl.clear();
   }
 
   //////////////////////////////////////////////////////////////////////////////////////////////
@@ -636,7 +696,9 @@ import java.util.concurrent.ExecutionException;
       @Nullable IMediaController caller,
       int sequenceNumber,
       @Nullable Bundle connectionRequestBundle) {
-    if (caller == null || connectionRequestBundle == null) {
+    @Nullable MediaSessionImpl sessionImpl = this.sessionImpl.get();
+    if (caller == null || connectionRequestBundle == null || sessionImpl == null) {
+      SessionUtil.disconnectIMediaController(caller);
       return;
     }
     ConnectionRequest request;
@@ -648,19 +710,27 @@ import java.util.concurrent.ExecutionException;
     }
     int uid = Binder.getCallingUid();
     int callingPid = Binder.getCallingPid();
+    @Nullable String packageName = request.packageName;
+    @SessionUtil.PackageValidationResult
+    int packageValidity = checkPackageValidity(sessionImpl.getContext(), packageName, uid);
+    if (packageValidity == PACKAGE_INVALID) {
+      Log.w(
+          TAG,
+          "Ignoring connection from invalid package name " + packageName + " (uid=" + uid + ")");
+      SessionUtil.disconnectIMediaController(caller);
+      return;
+    }
+
     long token = Binder.clearCallingIdentity();
     // Binder.getCallingPid() can be 0 for an oneway call from the remote process.
     // If it's the case, use PID from the ConnectionRequest.
     int pid = (callingPid != 0) ? callingPid : request.pid;
     try {
-
       MediaSessionManager.RemoteUserInfo remoteUserInfo =
-          new MediaSessionManager.RemoteUserInfo(request.packageName, pid, uid);
-      @Nullable MediaSessionImpl sessionImpl = this.sessionImpl.get();
+          new MediaSessionManager.RemoteUserInfo(packageName, pid, uid);
       boolean isTrustedForMediaControl =
-          sessionImpl != null
-              && MediaSessionManager.getSessionManager(sessionImpl.getContext())
-                  .isTrustedForMediaControl(remoteUserInfo);
+          MediaSessionManager.getSessionManager(sessionImpl.getContext())
+              .isTrustedForMediaControl(remoteUserInfo);
       ControllerInfo controllerInfo =
           new ControllerInfo(
               remoteUserInfo,
@@ -669,7 +739,8 @@ import java.util.concurrent.ExecutionException;
               isTrustedForMediaControl,
               new MediaSessionStub.Controller2Cb(caller, request.controllerInterfaceVersion),
               request.connectionHints,
-              request.maxCommandsForMediaItems);
+              request.maxCommandsForMediaItems,
+              /* isPackageNameVerified= */ packageValidity == PACKAGE_VALID);
       connect(caller, controllerInfo);
     } finally {
       Binder.restoreCallingIdentity(token);
@@ -681,19 +752,12 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    @Nullable
-    ControllerInfo controllerInfo = connectedControllersManager.getController(caller.asBinder());
-    if (controllerInfo != null) {
-      stopForControllerInfo(controllerInfo, sequenceNumber);
-    }
+    dispatchPlayerCommand(caller, sequenceNumber, this::stopForControllerInfo);
   }
 
   public void stopForControllerInfo(ControllerInfo controllerInfo, int sequenceNumber) {
-    queueSessionTaskWithPlayerCommandForControllerInfo(
-        controllerInfo,
-        sequenceNumber,
-        COMMAND_STOP,
-        sendSessionResultSuccess(PlayerWrapper::stop));
+    queueSessionTaskWithPlayerCommand(
+        controllerInfo, sequenceNumber, COMMAND_STOP, sendSessionResultSuccess(Player::stop));
   }
 
   @Override
@@ -707,9 +771,9 @@ import java.util.concurrent.ExecutionException;
       if (sessionImpl == null || sessionImpl.isReleased()) {
         return;
       }
-      postOrRun(
-          sessionImpl.getApplicationHandler(),
-          () -> connectedControllersManager.removeController(caller.asBinder()));
+      IBinder callerBinder = caller.asBinder();
+      postOrRunOnApplicationHandler(
+          () -> connectedControllersManager.removeController(callerBinder));
     } finally {
       Binder.restoreCallingIdentity(token);
     }
@@ -730,13 +794,20 @@ import java.util.concurrent.ExecutionException;
     }
     long token = Binder.clearCallingIdentity();
     try {
-      @Nullable
-      SequencedFutureManager manager =
-          connectedControllersManager.getSequencedFutureManager(caller.asBinder());
-      if (manager == null) {
+      @Nullable MediaSessionImpl sessionImpl = this.sessionImpl.get();
+      if (sessionImpl == null || sessionImpl.isReleased()) {
         return;
       }
-      manager.setFutureResult(sequenceNumber, result);
+      IBinder callerBinder = caller.asBinder();
+      postOrRunOnApplicationHandler(
+          () -> {
+            @Nullable
+            SequencedFutureManager manager =
+                connectedControllersManager.getSequencedFutureManager(callerBinder);
+            if (manager != null) {
+              manager.setFutureResult(sequenceNumber, result);
+            }
+          });
     } finally {
       Binder.restoreCallingIdentity(token);
     }
@@ -747,15 +818,11 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    @Nullable
-    ControllerInfo controller = connectedControllersManager.getController(caller.asBinder());
-    if (controller != null) {
-      playForControllerInfo(controller, sequenceNumber);
-    }
+    dispatchPlayerCommand(caller, sequenceNumber, this::playForControllerInfo);
   }
 
   public void playForControllerInfo(ControllerInfo controller, int sequenceNumber) {
-    queueSessionTaskWithPlayerCommandForControllerInfo(
+    queueSessionTaskWithPlayerCommand(
         controller,
         sequenceNumber,
         COMMAND_PLAY_PAUSE,
@@ -775,15 +842,11 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    @Nullable
-    ControllerInfo controllerInfo = connectedControllersManager.getController(caller.asBinder());
-    if (controllerInfo != null) {
-      pauseForControllerInfo(controllerInfo, sequenceNumber);
-    }
+    dispatchPlayerCommand(caller, sequenceNumber, this::pauseForControllerInfo);
   }
 
   public void pauseForControllerInfo(ControllerInfo controller, int sequenceNumber) {
-    queueSessionTaskWithPlayerCommandForControllerInfo(
+    queueSessionTaskWithPlayerCommand(
         controller, sequenceNumber, COMMAND_PLAY_PAUSE, sendSessionResultSuccess(Player::pause));
   }
 
@@ -792,7 +855,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller, sequenceNumber, COMMAND_PREPARE, sendSessionResultSuccess(Player::prepare));
   }
 
@@ -801,7 +864,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SEEK_TO_DEFAULT_POSITION,
@@ -814,7 +877,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || mediaItemIndex < 0) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SEEK_TO_MEDIA_ITEM,
@@ -829,7 +892,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM,
@@ -842,7 +905,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || mediaItemIndex < 0) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SEEK_TO_MEDIA_ITEM,
@@ -857,15 +920,11 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    @Nullable
-    ControllerInfo controllerInfo = connectedControllersManager.getController(caller.asBinder());
-    if (controllerInfo != null) {
-      seekBackForControllerInfo(controllerInfo, sequenceNumber);
-    }
+    dispatchPlayerCommand(caller, sequenceNumber, this::seekBackForControllerInfo);
   }
 
   public void seekBackForControllerInfo(ControllerInfo controllerInfo, int sequenceNumber) {
-    queueSessionTaskWithPlayerCommandForControllerInfo(
+    queueSessionTaskWithPlayerCommand(
         controllerInfo,
         sequenceNumber,
         COMMAND_SEEK_BACK,
@@ -873,19 +932,15 @@ import java.util.concurrent.ExecutionException;
   }
 
   @Override
-  public void seekForward(IMediaController caller, int sequenceNumber) {
+  public void seekForward(@Nullable IMediaController caller, int sequenceNumber) {
     if (caller == null) {
       return;
     }
-    @Nullable
-    ControllerInfo controllerInfo = connectedControllersManager.getController(caller.asBinder());
-    if (controllerInfo != null) {
-      seekForwardForControllerInfo(controllerInfo, sequenceNumber);
-    }
+    dispatchPlayerCommand(caller, sequenceNumber, this::seekForwardForControllerInfo);
   }
 
   public void seekForwardForControllerInfo(ControllerInfo controllerInfo, int sequenceNumber) {
-    queueSessionTaskWithPlayerCommandForControllerInfo(
+    queueSessionTaskWithPlayerCommand(
         controllerInfo,
         sequenceNumber,
         COMMAND_SEEK_FORWARD,
@@ -898,7 +953,19 @@ import java.util.concurrent.ExecutionException;
       int sequenceNumber,
       @Nullable Bundle commandBundle,
       @Nullable Bundle args) {
-    if (caller == null || commandBundle == null || args == null) {
+    onCustomCommandWithProgressUpdate(
+        caller, sequenceNumber, commandBundle, args, /* progressUpdateRequested= */ false);
+  }
+
+  @Override
+  public void onCustomCommandWithProgressUpdate(
+      @Nullable IMediaController caller,
+      int sequenceNumber,
+      @Nullable Bundle commandBundle,
+      @Nullable Bundle args,
+      boolean progressUpdateRequested) {
+    Bundle verifiedArgs = convertToNullIfInvalid(args);
+    if (caller == null || commandBundle == null || verifiedArgs == null) {
       return;
     }
     SessionCommand command;
@@ -908,13 +975,106 @@ import java.util.concurrent.ExecutionException;
       Log.w(TAG, "Ignoring malformed Bundle for SessionCommand", e);
       return;
     }
+    if (CommandButton.isPredefinedCustomCommandButtonCode(command.customAction)) {
+      dispatchCustomCommandAsPredefinedCommand(caller, sequenceNumber, command);
+      return;
+    }
     dispatchSessionTaskWithSessionCommand(
         caller,
         sequenceNumber,
         command,
         sendSessionResultWhenReady(
-            (sessionImpl, controller, sequenceNum) ->
-                sessionImpl.onCustomCommandOnHandler(controller, command, args)));
+            (sessionImpl, controller, sequenceNum) -> {
+              ProgressReporter progressReporter = null;
+              if (progressUpdateRequested) {
+                progressReporter =
+                    new ProgressReporter(
+                        sessionImpl, controller, sequenceNum, command, verifiedArgs);
+              }
+              ListenableFuture<SessionResult> future =
+                  sessionImpl.onCustomCommandOnHandler(
+                      controller, progressReporter, command, verifiedArgs);
+              if (progressReporter != null) {
+                progressReporter.setFuture(future);
+              }
+              return future;
+            }));
+  }
+
+  private void dispatchCustomCommandAsPredefinedCommand(
+      IMediaController caller, int sequenceNumber, SessionCommand command) {
+    long token = Binder.clearCallingIdentity();
+    try {
+      @Nullable MediaSessionImpl sessionImpl = this.sessionImpl.get();
+      if (sessionImpl == null || sessionImpl.isReleased()) {
+        return;
+      }
+      IBinder callerBinder = caller.asBinder();
+      postOrRunOnApplicationHandler(
+          () -> {
+            @Nullable
+            ControllerInfo controller = connectedControllersManager.getController(callerBinder);
+            if (controller == null) {
+              return;
+            }
+            if (!connectedControllersManager.isConnected(controller)) {
+              return;
+            }
+            CommandButton actualCommand;
+            try {
+              actualCommand = CommandButton.convertFromPredefinedCustomCommand(command);
+            } catch (RuntimeException e) {
+              // Catch exception caused by malformed data from a controller.
+              Log.w(TAG, "Failed to convert predefined custom command: " + command.customAction, e);
+              sendSessionResult(
+                  sessionImpl,
+                  controller,
+                  sequenceNumber,
+                  new SessionResult(SessionResult.RESULT_ERROR_BAD_VALUE));
+              return;
+            }
+            if (!actualCommand.canExecuteAction()) {
+              Log.w(TAG, "Can't execute predefined custom command: " + command.customAction);
+              sendSessionResult(
+                  sessionImpl,
+                  controller,
+                  sequenceNumber,
+                  new SessionResult(SessionResult.RESULT_ERROR_NOT_SUPPORTED));
+              return;
+            }
+            if (actualCommand.sessionCommand != null) {
+              checkState(
+                  actualCommand.sessionCommand.commandCode == COMMAND_CODE_SESSION_SET_RATING);
+              dispatchSessionTaskWithSessionCommand(
+                  caller,
+                  sequenceNumber,
+                  COMMAND_CODE_SESSION_SET_RATING,
+                  sendSessionResultWhenReady(
+                      (sessionImplInner, controllerInner, sequenceNum) ->
+                          sessionImplInner.onSetRatingOnHandler(
+                              controllerInner, (Rating) checkNotNull(actualCommand.parameter))));
+            } else {
+              if (actualCommand.isPlayRequestPlayerAction(sessionImpl.getPlayerWrapper())) {
+                playForControllerInfo(controller, sequenceNumber);
+              } else if (actualCommand.playerCommand == COMMAND_SET_MEDIA_ITEM) {
+                setMediaItemItemWithResetPositionForControllerInfo(
+                    controller,
+                    sequenceNumber,
+                    (MediaItem) checkNotNull(actualCommand.parameter),
+                    /* resetPosition= */ true);
+              } else {
+                queueSessionTaskWithPlayerCommand(
+                    controller,
+                    sequenceNumber,
+                    actualCommand.playerCommand,
+                    sendSessionResultSuccess(player -> actualCommand.executePlayerAction(player)));
+              }
+              connectedControllersManager.flushCommandQueue(controller);
+            }
+          });
+    } finally {
+      Binder.restoreCallingIdentity(token);
+    }
   }
 
   @Override
@@ -973,7 +1133,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || !(speed > 0f)) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SET_SPEED_AND_PITCH,
@@ -995,7 +1155,7 @@ import java.util.concurrent.ExecutionException;
       Log.w(TAG, "Ignoring malformed Bundle for PlaybackParameters", e);
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SET_SPEED_AND_PITCH,
@@ -1018,25 +1178,27 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || mediaItemBundle == null) {
       return;
     }
-    MediaItem mediaItem;
-    try {
-      mediaItem = MediaItem.fromBundle(mediaItemBundle);
-    } catch (RuntimeException e) {
-      Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
-      return;
-    }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SET_MEDIA_ITEM,
         sendSessionResultWhenReady(
             handleMediaItemsWithStartPositionWhenReady(
-                (sessionImpl, controller, sequenceNum) ->
-                    sessionImpl.onSetMediaItemsOnHandler(
-                        controller,
-                        ImmutableList.of(mediaItem),
-                        /* startIndex= */ 0,
-                        startPositionMs),
+                (sessionImpl, controller, sequenceNum) -> {
+                  MediaItem mediaItem;
+                  try {
+                    mediaItem =
+                        MediaItem.fromBundle(mediaItemBundle, controller.getInterfaceVersion());
+                  } catch (RuntimeException e) {
+                    Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
+                    return Futures.immediateFailedFuture(e);
+                  }
+                  return sessionImpl.onSetMediaItemsOnHandler(
+                      controller,
+                      ImmutableList.of(mediaItem),
+                      /* startIndex= */ 0,
+                      startPositionMs);
+                },
                 MediaUtils::setMediaItemsWithStartIndexAndPosition)));
   }
 
@@ -1049,15 +1211,41 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || mediaItemBundle == null) {
       return;
     }
-    MediaItem mediaItem;
-    try {
-      mediaItem = MediaItem.fromBundle(mediaItemBundle);
-    } catch (RuntimeException e) {
-      Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
-      return;
-    }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
+        sequenceNumber,
+        COMMAND_SET_MEDIA_ITEM,
+        sendSessionResultWhenReady(
+            handleMediaItemsWithStartPositionWhenReady(
+                (sessionImpl, controller, sequenceNum) -> {
+                  MediaItem mediaItem;
+                  try {
+                    mediaItem =
+                        MediaItem.fromBundle(mediaItemBundle, controller.getInterfaceVersion());
+                  } catch (RuntimeException e) {
+                    Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
+                    return Futures.immediateFailedFuture(e);
+                  }
+                  return sessionImpl.onSetMediaItemsOnHandler(
+                      controller,
+                      ImmutableList.of(mediaItem),
+                      resetPosition
+                          ? C.INDEX_UNSET
+                          : sessionImpl.getPlayerWrapper().getCurrentMediaItemIndex(),
+                      resetPosition
+                          ? C.TIME_UNSET
+                          : sessionImpl.getPlayerWrapper().getCurrentPosition());
+                },
+                MediaUtils::setMediaItemsWithStartIndexAndPosition)));
+  }
+
+  private void setMediaItemItemWithResetPositionForControllerInfo(
+      ControllerInfo controllerInfo,
+      int sequenceNumber,
+      MediaItem mediaItem,
+      boolean resetPosition) {
+    queueSessionTaskWithPlayerCommand(
+        controllerInfo,
         sequenceNumber,
         COMMAND_SET_MEDIA_ITEM,
         sendSessionResultWhenReady(
@@ -1093,31 +1281,34 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || mediaItemsRetriever == null) {
       return;
     }
-    List<MediaItem> mediaItemList;
-    try {
-      mediaItemList =
-          BundleCollectionUtil.fromBundleList(
-              MediaItem::fromBundle, BundleListRetriever.getList(mediaItemsRetriever));
-    } catch (RuntimeException e) {
-      Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
-      return;
-    }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_CHANGE_MEDIA_ITEMS,
         sendSessionResultWhenReady(
             handleMediaItemsWithStartPositionWhenReady(
-                (sessionImpl, controller, sequenceNum) ->
-                    sessionImpl.onSetMediaItemsOnHandler(
-                        controller,
-                        mediaItemList,
-                        resetPosition
-                            ? C.INDEX_UNSET
-                            : sessionImpl.getPlayerWrapper().getCurrentMediaItemIndex(),
-                        resetPosition
-                            ? C.TIME_UNSET
-                            : sessionImpl.getPlayerWrapper().getCurrentPosition()),
+                (sessionImpl, controller, sequenceNum) -> {
+                  ImmutableList<MediaItem> mediaItemList;
+                  try {
+                    mediaItemList =
+                        BundleCollectionUtil.fromBundleList(
+                            bundle ->
+                                MediaItem.fromBundle(bundle, controller.getInterfaceVersion()),
+                            BundleListRetriever.getList(mediaItemsRetriever));
+                  } catch (RuntimeException e) {
+                    Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
+                    return Futures.immediateFailedFuture(e);
+                  }
+                  return sessionImpl.onSetMediaItemsOnHandler(
+                      controller,
+                      mediaItemList,
+                      resetPosition
+                          ? C.INDEX_UNSET
+                          : sessionImpl.getPlayerWrapper().getCurrentMediaItemIndex(),
+                      resetPosition
+                          ? C.TIME_UNSET
+                          : sessionImpl.getPlayerWrapper().getCurrentPosition());
+                },
                 MediaUtils::setMediaItemsWithStartIndexAndPosition)));
   }
 
@@ -1133,31 +1324,34 @@ import java.util.concurrent.ExecutionException;
         || (startIndex != C.INDEX_UNSET && startIndex < 0)) {
       return;
     }
-    List<MediaItem> mediaItemList;
-    try {
-      mediaItemList =
-          BundleCollectionUtil.fromBundleList(
-              MediaItem::fromBundle, BundleListRetriever.getList(mediaItemsRetriever));
-    } catch (RuntimeException e) {
-      Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
-      return;
-    }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_CHANGE_MEDIA_ITEMS,
         sendSessionResultWhenReady(
             handleMediaItemsWithStartPositionWhenReady(
-                (sessionImpl, controller, sequenceNum) ->
-                    sessionImpl.onSetMediaItemsOnHandler(
-                        controller,
-                        mediaItemList,
-                        (startIndex == C.INDEX_UNSET)
-                            ? sessionImpl.getPlayerWrapper().getCurrentMediaItemIndex()
-                            : startIndex,
-                        (startIndex == C.INDEX_UNSET)
-                            ? sessionImpl.getPlayerWrapper().getCurrentPosition()
-                            : startPositionMs),
+                (sessionImpl, controller, sequenceNum) -> {
+                  ImmutableList<MediaItem> mediaItemList;
+                  try {
+                    mediaItemList =
+                        BundleCollectionUtil.fromBundleList(
+                            bundle ->
+                                MediaItem.fromBundle(bundle, controller.getInterfaceVersion()),
+                            BundleListRetriever.getList(mediaItemsRetriever));
+                  } catch (RuntimeException e) {
+                    Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
+                    return Futures.immediateFailedFuture(e);
+                  }
+                  return sessionImpl.onSetMediaItemsOnHandler(
+                      controller,
+                      mediaItemList,
+                      (startIndex == C.INDEX_UNSET)
+                          ? sessionImpl.getPlayerWrapper().getCurrentMediaItemIndex()
+                          : startIndex,
+                      (startIndex == C.INDEX_UNSET)
+                          ? sessionImpl.getPlayerWrapper().getCurrentPosition()
+                          : startPositionMs);
+                },
                 MediaUtils::setMediaItemsWithStartIndexAndPosition)));
   }
 
@@ -1169,18 +1363,24 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || playlistMetadataBundle == null) {
       return;
     }
-    MediaMetadata playlistMetadata;
-    try {
-      playlistMetadata = MediaMetadata.fromBundle(playlistMetadataBundle);
-    } catch (RuntimeException e) {
-      Log.w(TAG, "Ignoring malformed Bundle for MediaMetadata", e);
-      return;
-    }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SET_PLAYLIST_METADATA,
-        sendSessionResultSuccess(player -> player.setPlaylistMetadata(playlistMetadata)));
+        sendSessionResultWhenReady(
+            (sessionImpl, controller, sequenceNum) -> {
+              MediaMetadata playlistMetadata;
+              try {
+                playlistMetadata =
+                    MediaMetadata.fromBundle(
+                        playlistMetadataBundle, controller.getInterfaceVersion());
+              } catch (RuntimeException e) {
+                Log.w(TAG, "Ignoring malformed Bundle for MediaMetadata", e);
+                return Futures.immediateFailedFuture(e);
+              }
+              sessionImpl.getPlayerWrapper().setPlaylistMetadata(playlistMetadata);
+              return Futures.immediateFuture(new SessionResult(SessionResult.RESULT_SUCCESS));
+            }));
   }
 
   @Override
@@ -1189,21 +1389,24 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || mediaItemBundle == null) {
       return;
     }
-    MediaItem mediaItem;
-    try {
-      mediaItem = MediaItem.fromBundle(mediaItemBundle);
-    } catch (RuntimeException e) {
-      Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
-      return;
-    }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_CHANGE_MEDIA_ITEMS,
         sendSessionResultWhenReady(
             handleMediaItemsWhenReady(
-                (sessionImpl, controller, sequenceNum) ->
-                    sessionImpl.onAddMediaItemsOnHandler(controller, ImmutableList.of(mediaItem)),
+                (sessionImpl, controller, sequenceNum) -> {
+                  MediaItem mediaItem;
+                  try {
+                    mediaItem =
+                        MediaItem.fromBundle(mediaItemBundle, controller.getInterfaceVersion());
+                  } catch (RuntimeException e) {
+                    Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
+                    return Futures.immediateFailedFuture(e);
+                  }
+                  return sessionImpl.onAddMediaItemsOnHandler(
+                      controller, ImmutableList.of(mediaItem));
+                },
                 (playerWrapper, controller, mediaItems) ->
                     playerWrapper.addMediaItems(mediaItems))));
   }
@@ -1217,21 +1420,24 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || mediaItemBundle == null || index < 0) {
       return;
     }
-    MediaItem mediaItem;
-    try {
-      mediaItem = MediaItem.fromBundle(mediaItemBundle);
-    } catch (RuntimeException e) {
-      Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
-      return;
-    }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_CHANGE_MEDIA_ITEMS,
         sendSessionResultWhenReady(
             handleMediaItemsWhenReady(
-                (sessionImpl, controller, sequenceNum) ->
-                    sessionImpl.onAddMediaItemsOnHandler(controller, ImmutableList.of(mediaItem)),
+                (sessionImpl, controller, sequenceNum) -> {
+                  MediaItem mediaItem;
+                  try {
+                    mediaItem =
+                        MediaItem.fromBundle(mediaItemBundle, controller.getInterfaceVersion());
+                  } catch (RuntimeException e) {
+                    Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
+                    return Futures.immediateFailedFuture(e);
+                  }
+                  return sessionImpl.onAddMediaItemsOnHandler(
+                      controller, ImmutableList.of(mediaItem));
+                },
                 (player, controller, mediaItems) ->
                     player.addMediaItems(
                         maybeCorrectMediaItemIndex(controller, player, index), mediaItems))));
@@ -1245,23 +1451,26 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || mediaItemsRetriever == null) {
       return;
     }
-    List<MediaItem> mediaItems;
-    try {
-      mediaItems =
-          BundleCollectionUtil.fromBundleList(
-              MediaItem::fromBundle, BundleListRetriever.getList(mediaItemsRetriever));
-    } catch (RuntimeException e) {
-      Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
-      return;
-    }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_CHANGE_MEDIA_ITEMS,
         sendSessionResultWhenReady(
             handleMediaItemsWhenReady(
-                (sessionImpl, controller, sequenceNum) ->
-                    sessionImpl.onAddMediaItemsOnHandler(controller, mediaItems),
+                (sessionImpl, controller, sequenceNum) -> {
+                  ImmutableList<MediaItem> mediaItems;
+                  try {
+                    mediaItems =
+                        BundleCollectionUtil.fromBundleList(
+                            bundle ->
+                                MediaItem.fromBundle(bundle, controller.getInterfaceVersion()),
+                            BundleListRetriever.getList(mediaItemsRetriever));
+                  } catch (RuntimeException e) {
+                    Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
+                    return Futures.immediateFailedFuture(e);
+                  }
+                  return sessionImpl.onAddMediaItemsOnHandler(controller, mediaItems);
+                },
                 (playerWrapper, controller, items) -> playerWrapper.addMediaItems(items))));
   }
 
@@ -1274,23 +1483,26 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || mediaItemsRetriever == null || index < 0) {
       return;
     }
-    List<MediaItem> mediaItems;
-    try {
-      mediaItems =
-          BundleCollectionUtil.fromBundleList(
-              MediaItem::fromBundle, BundleListRetriever.getList(mediaItemsRetriever));
-    } catch (RuntimeException e) {
-      Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
-      return;
-    }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_CHANGE_MEDIA_ITEMS,
         sendSessionResultWhenReady(
             handleMediaItemsWhenReady(
-                (sessionImpl, controller, sequenceNum) ->
-                    sessionImpl.onAddMediaItemsOnHandler(controller, mediaItems),
+                (sessionImpl, controller, sequenceNum) -> {
+                  ImmutableList<MediaItem> mediaItems;
+                  try {
+                    mediaItems =
+                        BundleCollectionUtil.fromBundleList(
+                            bundle ->
+                                MediaItem.fromBundle(bundle, controller.getInterfaceVersion()),
+                            BundleListRetriever.getList(mediaItemsRetriever));
+                  } catch (RuntimeException e) {
+                    Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
+                    return Futures.immediateFailedFuture(e);
+                  }
+                  return sessionImpl.onAddMediaItemsOnHandler(controller, mediaItems);
+                },
                 (player, controller, items) ->
                     player.addMediaItems(
                         maybeCorrectMediaItemIndex(controller, player, index), items))));
@@ -1301,7 +1513,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || index < 0) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_CHANGE_MEDIA_ITEMS,
@@ -1316,7 +1528,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || fromIndex < 0 || toIndex < fromIndex) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_CHANGE_MEDIA_ITEMS,
@@ -1332,7 +1544,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_CHANGE_MEDIA_ITEMS,
@@ -1345,7 +1557,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || currentIndex < 0 || newIndex < 0) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_CHANGE_MEDIA_ITEMS,
@@ -1362,7 +1574,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || fromIndex < 0 || toIndex < fromIndex || newIndex < 0) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_CHANGE_MEDIA_ITEMS,
@@ -1378,21 +1590,24 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || mediaItemBundle == null || index < 0) {
       return;
     }
-    MediaItem mediaItem;
-    try {
-      mediaItem = MediaItem.fromBundle(mediaItemBundle);
-    } catch (RuntimeException e) {
-      Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
-      return;
-    }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_CHANGE_MEDIA_ITEMS,
         sendSessionResultWhenReady(
             handleMediaItemsWhenReady(
-                (sessionImpl, controller, sequenceNum) ->
-                    sessionImpl.onAddMediaItemsOnHandler(controller, ImmutableList.of(mediaItem)),
+                (sessionImpl, controller, sequenceNum) -> {
+                  MediaItem mediaItem;
+                  try {
+                    mediaItem =
+                        MediaItem.fromBundle(mediaItemBundle, controller.getInterfaceVersion());
+                  } catch (RuntimeException e) {
+                    Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
+                    return Futures.immediateFailedFuture(e);
+                  }
+                  return sessionImpl.onAddMediaItemsOnHandler(
+                      controller, ImmutableList.of(mediaItem));
+                },
                 (player, controller, mediaItems) -> {
                   if (mediaItems.size() == 1) {
                     player.replaceMediaItem(
@@ -1416,23 +1631,26 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || mediaItemsRetriever == null || fromIndex < 0 || toIndex < fromIndex) {
       return;
     }
-    ImmutableList<MediaItem> mediaItems;
-    try {
-      mediaItems =
-          BundleCollectionUtil.fromBundleList(
-              MediaItem::fromBundle, BundleListRetriever.getList(mediaItemsRetriever));
-    } catch (RuntimeException e) {
-      Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
-      return;
-    }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_CHANGE_MEDIA_ITEMS,
         sendSessionResultWhenReady(
             handleMediaItemsWhenReady(
-                (sessionImpl, controller, sequenceNum) ->
-                    sessionImpl.onAddMediaItemsOnHandler(controller, mediaItems),
+                (sessionImpl, controller, sequenceNum) -> {
+                  ImmutableList<MediaItem> mediaItems;
+                  try {
+                    mediaItems =
+                        BundleCollectionUtil.fromBundleList(
+                            bundle ->
+                                MediaItem.fromBundle(bundle, controller.getInterfaceVersion()),
+                            BundleListRetriever.getList(mediaItemsRetriever));
+                  } catch (RuntimeException e) {
+                    Log.w(TAG, "Ignoring malformed Bundle for MediaItem", e);
+                    return Futures.immediateFailedFuture(e);
+                  }
+                  return sessionImpl.onAddMediaItemsOnHandler(controller, mediaItems);
+                },
                 (player, controller, items) ->
                     player.replaceMediaItems(
                         maybeCorrectMediaItemIndex(controller, player, fromIndex),
@@ -1445,7 +1663,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
@@ -1457,7 +1675,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
@@ -1469,15 +1687,11 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    @Nullable
-    ControllerInfo controllerInfo = connectedControllersManager.getController(caller.asBinder());
-    if (controllerInfo != null) {
-      seekToPreviousForControllerInfo(controllerInfo, sequenceNumber);
-    }
+    dispatchPlayerCommand(caller, sequenceNumber, this::seekToPreviousForControllerInfo);
   }
 
   public void seekToPreviousForControllerInfo(ControllerInfo controllerInfo, int sequenceNumber) {
-    queueSessionTaskWithPlayerCommandForControllerInfo(
+    queueSessionTaskWithPlayerCommand(
         controllerInfo,
         sequenceNumber,
         COMMAND_SEEK_TO_PREVIOUS,
@@ -1489,15 +1703,11 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    @Nullable
-    ControllerInfo controllerInfo = connectedControllersManager.getController(caller.asBinder());
-    if (controllerInfo != null) {
-      seekToNextForControllerInfo(controllerInfo, sequenceNumber);
-    }
+    dispatchPlayerCommand(caller, sequenceNumber, this::seekToNextForControllerInfo);
   }
 
   public void seekToNextForControllerInfo(ControllerInfo controllerInfo, int sequenceNumber) {
-    queueSessionTaskWithPlayerCommandForControllerInfo(
+    queueSessionTaskWithPlayerCommand(
         controllerInfo,
         sequenceNumber,
         COMMAND_SEEK_TO_NEXT,
@@ -1515,7 +1725,7 @@ import java.util.concurrent.ExecutionException;
         && repeatMode != Player.REPEAT_MODE_ONE) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SET_REPEAT_MODE,
@@ -1528,7 +1738,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SET_SHUFFLE_MODE,
@@ -1541,11 +1751,73 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SET_VIDEO_SURFACE,
-        sendSessionResultSuccess(player -> player.setVideoSurface(surface)));
+        sendSessionResultSuccess(
+            player -> {
+              if (checkNotNull(sessionImpl.get()).shouldUseLegacySurfaceHandling()) {
+                player.setVideoSurface(surface);
+              } else {
+                if (surface == null) {
+                  player.setVideoSurfaceHolder(null);
+                  surfaceHolderWithSize = null;
+                } else {
+                  surfaceHolderWithSize = new SurfaceHolderWithSize(surface);
+                  player.setVideoSurfaceHolder(surfaceHolderWithSize);
+                }
+              }
+            }));
+  }
+
+  @Override
+  public void setVideoSurfaceWithSize(
+      @Nullable IMediaController caller,
+      int sequenceNumber,
+      @Nullable Surface surface,
+      int width,
+      int height) {
+    if (caller == null) {
+      return;
+    }
+    dispatchAndQueueSessionTaskWithPlayerCommand(
+        caller,
+        sequenceNumber,
+        COMMAND_SET_VIDEO_SURFACE,
+        sendSessionResultSuccess(
+            player -> {
+              if (checkNotNull(sessionImpl.get()).shouldUseLegacySurfaceHandling()) {
+                player.setVideoSurface(surface);
+              } else {
+                if (surface == null) {
+                  player.setVideoSurfaceHolder(null);
+                  surfaceHolderWithSize = null;
+                } else {
+                  surfaceHolderWithSize = new SurfaceHolderWithSize(surface, width, height);
+                  player.setVideoSurfaceHolder(surfaceHolderWithSize);
+                }
+              }
+            }));
+  }
+
+  @Override
+  public void onSurfaceSizeChanged(
+      @Nullable IMediaController caller, int sequenceNumber, int width, int height) {
+    if (caller == null) {
+      return;
+    }
+    dispatchAndQueueSessionTaskWithPlayerCommand(
+        caller,
+        sequenceNumber,
+        COMMAND_SET_VIDEO_SURFACE,
+        sendSessionResultSuccess(
+            player -> {
+              if (!checkNotNull(sessionImpl.get()).shouldUseLegacySurfaceHandling()
+                  && surfaceHolderWithSize != null) {
+                surfaceHolderWithSize.setFixedSize(width, height);
+              }
+            }));
   }
 
   @Override
@@ -1553,11 +1825,29 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || !(volume >= 0f && volume <= 1f)) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SET_VOLUME,
         sendSessionResultSuccess(player -> player.setVolume(volume)));
+  }
+
+  @Override
+  public void mute(@Nullable IMediaController caller, int sequenceNumber) {
+    if (caller == null) {
+      return;
+    }
+    dispatchAndQueueSessionTaskWithPlayerCommand(
+        caller, sequenceNumber, COMMAND_SET_VOLUME, sendSessionResultSuccess(Player::mute));
+  }
+
+  @Override
+  public void unmute(@Nullable IMediaController caller, int sequenceNumber) {
+    if (caller == null) {
+      return;
+    }
+    dispatchAndQueueSessionTaskWithPlayerCommand(
+        caller, sequenceNumber, COMMAND_SET_VOLUME, sendSessionResultSuccess(Player::unmute));
   }
 
   @SuppressWarnings("deprecation") // Backwards compatibility a for flag-less method
@@ -1566,7 +1856,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || volume < 0) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         Player.COMMAND_SET_DEVICE_VOLUME,
@@ -1579,7 +1869,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null || volume < 0) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SET_DEVICE_VOLUME_WITH_FLAGS,
@@ -1592,7 +1882,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         Player.COMMAND_ADJUST_DEVICE_VOLUME,
@@ -1605,7 +1895,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_ADJUST_DEVICE_VOLUME_WITH_FLAGS,
@@ -1618,7 +1908,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         Player.COMMAND_ADJUST_DEVICE_VOLUME,
@@ -1631,7 +1921,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_ADJUST_DEVICE_VOLUME_WITH_FLAGS,
@@ -1644,7 +1934,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         Player.COMMAND_ADJUST_DEVICE_VOLUME,
@@ -1657,7 +1947,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_ADJUST_DEVICE_VOLUME_WITH_FLAGS,
@@ -1680,7 +1970,7 @@ import java.util.concurrent.ExecutionException;
       Log.w(TAG, "Ignoring malformed Bundle for AudioAttributes", e);
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SET_AUDIO_ATTRIBUTES,
@@ -1694,7 +1984,7 @@ import java.util.concurrent.ExecutionException;
     if (caller == null) {
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_PLAY_PAUSE,
@@ -1712,12 +2002,14 @@ import java.util.concurrent.ExecutionException;
       if (sessionImpl == null || sessionImpl.isReleased()) {
         return;
       }
-      ControllerInfo controllerInfo = connectedControllersManager.getController(caller.asBinder());
-      if (controllerInfo != null) {
-        postOrRun(
-            sessionImpl.getApplicationHandler(),
-            () -> connectedControllersManager.flushCommandQueue(controllerInfo));
-      }
+      IBinder callerBinder = caller.asBinder();
+      postOrRunOnApplicationHandler(
+          () -> {
+            ControllerInfo controllerInfo = connectedControllersManager.getController(callerBinder);
+            if (controllerInfo != null) {
+              connectedControllersManager.flushCommandQueue(controllerInfo);
+            }
+          });
     } finally {
       Binder.restoreCallingIdentity(token);
     }
@@ -1739,7 +2031,7 @@ import java.util.concurrent.ExecutionException;
       Log.w(TAG, "Ignoring malformed Bundle for TrackSelectionParameters", e);
       return;
     }
-    queueSessionTaskWithPlayerCommand(
+    dispatchAndQueueSessionTaskWithPlayerCommand(
         caller,
         sequenceNumber,
         COMMAND_SET_TRACK_SELECTION_PARAMETERS,
@@ -1958,10 +2250,39 @@ import java.util.concurrent.ExecutionException;
                 librarySessionImpl.onUnsubscribeOnHandler(controller, parentId)));
   }
 
-  /* package */ PlayerInfo generateAndCacheUniqueTrackGroupIds(PlayerInfo playerInfo) {
+  /* package */ PlayerInfo updatePlayerInfoWithUniqueTrackGroupIds(PlayerInfo playerInfo) {
     ImmutableList<Tracks.Group> trackGroups = playerInfo.currentTracks.getGroups();
+
+    // Update unique IDs first
+    generateAndCacheUniqueTrackGroupIds(trackGroups);
+
+    // Update track groups with the new ID mapping
     ImmutableList.Builder<Tracks.Group> updatedTrackGroups = ImmutableList.builder();
+    for (int i = 0; i < trackGroups.size(); i++) {
+      Tracks.Group trackGroup = trackGroups.get(i);
+      TrackGroup mediaTrackGroup = updateTrackGroupWithUniqueIds(trackGroup.getMediaTrackGroup());
+      updatedTrackGroups.add(trackGroup.copyWithMediaTrackGroup(mediaTrackGroup));
+    }
+    playerInfo = playerInfo.copyWithCurrentTracks(new Tracks(updatedTrackGroups.build()));
+
+    // Update track group in track selection parameter overrides with new ID mapping
+    if (playerInfo.trackSelectionParameters.overrides.isEmpty()) {
+      return playerInfo;
+    }
+    TrackSelectionParameters.Builder updatedTrackSelectionParameters =
+        playerInfo.trackSelectionParameters.buildUpon().clearOverrides();
+    for (TrackSelectionOverride override : playerInfo.trackSelectionParameters.overrides.values()) {
+      TrackGroup trackGroup = updateTrackGroupWithUniqueIds(override.mediaTrackGroup);
+      updatedTrackSelectionParameters.addOverride(
+          new TrackSelectionOverride(trackGroup, override.trackIndices));
+    }
+    return playerInfo.copyWithTrackSelectionParameters(updatedTrackSelectionParameters.build());
+  }
+
+  private void generateAndCacheUniqueTrackGroupIds(ImmutableList<Tracks.Group> trackGroups) {
     ImmutableBiMap.Builder<TrackGroup, String> updatedTrackGroupIdMap = ImmutableBiMap.builder();
+    ImmutableMap.Builder<String, String> updatedTrackGroupOriginalToUniqueMap =
+        ImmutableMap.builder();
     for (int i = 0; i < trackGroups.size(); i++) {
       Tracks.Group trackGroup = trackGroups.get(i);
       TrackGroup mediaTrackGroup = trackGroup.getMediaTrackGroup();
@@ -1970,26 +2291,46 @@ import java.util.concurrent.ExecutionException;
         uniqueId = generateUniqueTrackGroupId(mediaTrackGroup);
       }
       updatedTrackGroupIdMap.put(mediaTrackGroup, uniqueId);
-      updatedTrackGroups.add(trackGroup.copyWithId(uniqueId));
+      updatedTrackGroupOriginalToUniqueMap.put(mediaTrackGroup.id, uniqueId);
     }
     trackGroupIdMap = updatedTrackGroupIdMap.buildOrThrow();
-    playerInfo = playerInfo.copyWithCurrentTracks(new Tracks(updatedTrackGroups.build()));
-    if (playerInfo.trackSelectionParameters.overrides.isEmpty()) {
-      return playerInfo;
+    // The original track group ids don't have to be unique, so do a best effort mapping only.
+    trackGroupOriginalToUniqueIdMap = updatedTrackGroupOriginalToUniqueMap.buildKeepingLast();
+  }
+
+  private TrackGroup updateTrackGroupWithUniqueIds(TrackGroup trackGroup) {
+    // Map the id of this group.
+    @Nullable String uniqueGroupId = trackGroupIdMap.get(trackGroup);
+    if (uniqueGroupId == null) {
+      uniqueGroupId = trackGroup.id;
     }
-    TrackSelectionParameters.Builder updatedTrackSelectionParameters =
-        playerInfo.trackSelectionParameters.buildUpon().clearOverrides();
-    for (TrackSelectionOverride override : playerInfo.trackSelectionParameters.overrides.values()) {
-      TrackGroup trackGroup = override.mediaTrackGroup;
-      @Nullable String uniqueId = trackGroupIdMap.get(trackGroup);
-      if (uniqueId != null) {
-        updatedTrackSelectionParameters.addOverride(
-            new TrackSelectionOverride(trackGroup.copyWithId(uniqueId), override.trackIndices));
-      } else {
-        updatedTrackSelectionParameters.addOverride(override);
+    // Check if any primary group ids need to be updated.
+    boolean hasPrimaryTrackGroupIds = false;
+    for (int i = 0; i < trackGroup.length; i++) {
+      if (trackGroup.getFormat(i).primaryTrackGroupId != null) {
+        hasPrimaryTrackGroupIds = true;
+        break;
       }
     }
-    return playerInfo.copyWithTrackSelectionParameters(updatedTrackSelectionParameters.build());
+    if (!hasPrimaryTrackGroupIds) {
+      return trackGroup.copyWithId(uniqueGroupId);
+    }
+    Format[] updatedFormats = new Format[trackGroup.length];
+    for (int i = 0; i < trackGroup.length; i++) {
+      Format format = trackGroup.getFormat(i);
+      @Nullable
+      String uniquePrimaryTrackGroupId =
+          format.primaryTrackGroupId != null
+              ? trackGroupOriginalToUniqueIdMap.get(format.primaryTrackGroupId)
+              : null;
+      if (uniquePrimaryTrackGroupId != null) {
+        updatedFormats[i] =
+            format.buildUpon().setPrimaryTrackGroupId(uniquePrimaryTrackGroupId).build();
+      } else {
+        updatedFormats[i] = format;
+      }
+    }
+    return new TrackGroup(uniqueGroupId, updatedFormats);
   }
 
   private TrackSelectionParameters updateOverridesUsingUniqueTrackGroupIds(
@@ -2056,7 +2397,7 @@ import java.util.concurrent.ExecutionException;
     @Override
     public void onLibraryResult(int sequenceNumber, LibraryResult<?> result)
         throws RemoteException {
-      iController.onLibraryResult(sequenceNumber, result.toBundle());
+      iController.onLibraryResult(sequenceNumber, result.toBundle(controllerInterfaceVersion));
     }
 
     @Override
@@ -2067,7 +2408,7 @@ import java.util.concurrent.ExecutionException;
         boolean excludeTimeline,
         boolean excludeTracks)
         throws RemoteException {
-      Assertions.checkState(controllerInterfaceVersion != 0);
+      checkState(controllerInterfaceVersion != 0);
       // The bundling exclusions merge the performance overrides with the available commands.
       boolean bundlingExclusionsTimeline =
           excludeTimeline || !availableCommands.contains(Player.COMMAND_GET_TIMELINE);
@@ -2101,7 +2442,9 @@ import java.util.concurrent.ExecutionException;
     public void setCustomLayout(int sequenceNumber, List<CommandButton> layout)
         throws RemoteException {
       iController.onSetCustomLayout(
-          sequenceNumber, BundleCollectionUtil.toBundleList(layout, CommandButton::toBundle));
+          sequenceNumber,
+          BundleCollectionUtil.toBundleList(
+              layout, button -> button.toBundle(controllerInterfaceVersion)));
     }
 
     @Override
@@ -2110,7 +2453,8 @@ import java.util.concurrent.ExecutionException;
       if (controllerInterfaceVersion >= 7) {
         iController.onSetMediaButtonPreferences(
             sequenceNumber,
-            BundleCollectionUtil.toBundleList(mediaButtonPreferences, CommandButton::toBundle));
+            BundleCollectionUtil.toBundleList(
+                mediaButtonPreferences, button -> button.toBundle(controllerInterfaceVersion)));
       } else {
         // Controller doesn't support media button preferences, send the list as a custom layout.
         // TODO: b/332877990 - Improve this logic to take allowed command and session extras for
@@ -2119,10 +2463,12 @@ import java.util.concurrent.ExecutionException;
             CommandButton.getCustomLayoutFromMediaButtonPreferences(
                 mediaButtonPreferences,
                 /* backSlotAllowed= */ true,
-                /* forwardSlotAllowed= */ true);
+                /* forwardSlotAllowed= */ true,
+                MediaLibraryInfo.INTERFACE_VERSION);
         iController.onSetCustomLayout(
             sequenceNumber,
-            BundleCollectionUtil.toBundleList(customLayout, CommandButton::toBundle));
+            BundleCollectionUtil.toBundleList(
+                customLayout, button -> button.toBundle(controllerInterfaceVersion)));
       }
     }
 
@@ -2154,6 +2500,12 @@ import java.util.concurrent.ExecutionException;
       iController.onCustomCommand(sequenceNumber, command.toBundle(), args);
     }
 
+    @Override
+    public void sendCustomCommandProgressUpdate(
+        int seq, SessionCommand command, Bundle args, Bundle progressData) throws RemoteException {
+      iController.onCustomCommandProgressUpdate(seq, command.toBundle(), args, progressData);
+    }
+
     @SuppressWarnings("nullness:argument") // params can be null.
     @Override
     public void onChildrenChanged(
@@ -2173,8 +2525,8 @@ import java.util.concurrent.ExecutionException;
     }
 
     @Override
-    public void onDisconnected(int sequenceNumber) throws RemoteException {
-      iController.onDisconnected(sequenceNumber);
+    public void onDisconnected(int sequenceNumber) {
+      SessionUtil.disconnectIMediaController(iController);
     }
 
     @Override
@@ -2190,6 +2542,12 @@ import java.util.concurrent.ExecutionException;
           sessionPositionInfo
               .filterByAvailableCommands(canAccessCurrentMediaItem, canAccessTimeline)
               .toBundle(controllerInterfaceVersion));
+    }
+
+    @Override
+    public void onSurfaceSizeChanged(int sequenceNumber, int width, int height)
+        throws RemoteException {
+      iController.onSurfaceSizeChanged(sequenceNumber, width, height);
     }
 
     @Override
@@ -2224,5 +2582,122 @@ import java.util.concurrent.ExecutionException;
       Controller2Cb other = (Controller2Cb) obj;
       return Objects.equals(getCallbackBinder(), other.getCallbackBinder());
     }
+  }
+
+  private static class ProgressReporter implements MediaSession.ProgressReporter {
+
+    private final MediaSessionImpl session;
+    private final ControllerInfo controller;
+    private final int customCommandFutureSequence;
+    private final SessionCommand command;
+    private final Bundle extras;
+    @Nullable private ListenableFuture<SessionResult> future;
+
+    public ProgressReporter(
+        MediaSessionImpl session,
+        ControllerInfo controller,
+        int customCommandFutureSequence,
+        SessionCommand command,
+        Bundle extras) {
+      this.session = session;
+      this.controller = controller;
+      this.customCommandFutureSequence = customCommandFutureSequence;
+      this.command = command;
+      this.extras = extras;
+    }
+
+    @Override
+    public void sendProgressUpdate(Bundle progressData) {
+      if ((future == null || !future.isDone()) && !session.isReleased()) {
+        session.sendCustomCommandProgressUpdate(
+            controller, customCommandFutureSequence, command, extras, progressData);
+      }
+    }
+
+    public void setFuture(ListenableFuture<SessionResult> future) {
+      this.future = future;
+    }
+  }
+
+  @VisibleForTesting
+  /* package */ static class SurfaceHolderWithSize implements SurfaceHolder {
+    private final Surface surface;
+    private final Rect surfaceFrame = new Rect();
+    @Nullable private SurfaceHolder.Callback callback;
+
+    SurfaceHolderWithSize(Surface surface) {
+      this.surface = surface;
+    }
+
+    SurfaceHolderWithSize(Surface surface, int width, int height) {
+      this.surface = surface;
+      surfaceFrame.set(0, 0, width, height);
+    }
+
+    @Override
+    public void setFixedSize(int width, int height) {
+      surfaceFrame.set(0, 0, width, height);
+      if (callback != null) {
+        // doesn't allow PixelFormat.UNKNOWN
+        callback.surfaceChanged(this, /* format= */ PixelFormat.RGBA_8888, width, height);
+      }
+    }
+
+    @Override
+    public void addCallback(Callback callback) {
+      this.callback = callback;
+    }
+
+    @Override
+    public void removeCallback(Callback callback) {
+      if (this.callback == callback) {
+        this.callback = null;
+      }
+    }
+
+    @Override
+    public Surface getSurface() {
+      return surface;
+    }
+
+    @Override
+    public Rect getSurfaceFrame() {
+      return surfaceFrame;
+    }
+
+    // Can be left as stubs.
+    @Override
+    public boolean isCreating() {
+      return false;
+    }
+
+    @Override
+    public void setType(int type) {}
+
+    @Override
+    public void setSizeFromLayout() {}
+
+    @Override
+    public void setFormat(int format) {}
+
+    @Override
+    public void setKeepScreenOn(boolean screenOn) {}
+
+    @Override
+    public Canvas lockCanvas() {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public Canvas lockCanvas(Rect dirty) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void unlockCanvasAndPost(Canvas canvas) {}
+  }
+
+  private interface PlayerCommandTask {
+    void run(ControllerInfo controller, int sequenceNumber);
   }
 }

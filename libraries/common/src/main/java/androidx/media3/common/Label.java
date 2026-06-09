@@ -15,7 +15,7 @@
  */
 package androidx.media3.common;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import android.os.Bundle;
 import androidx.annotation.Nullable;
@@ -64,6 +64,11 @@ public class Label {
     int result = value.hashCode();
     result = 31 * result + (language != null ? language.hashCode() : 0);
     return result;
+  }
+
+  @Override
+  public String toString() {
+    return "{ lang=" + language + ", '" + value + "' }";
   }
 
   private static final String FIELD_LANGUAGE_INDEX = Util.intToStringMaxRadix(0);

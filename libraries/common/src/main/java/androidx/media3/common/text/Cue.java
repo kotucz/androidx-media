@@ -16,7 +16,9 @@
 package androidx.media3.common.text;
 
 import static androidx.media3.common.text.CustomSpanBundler.bundleCustomSpans;
-import static androidx.media3.common.util.Assertions.checkState;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.annotation.ElementType.FIELD;
 import static java.lang.annotation.ElementType.LOCAL_VARIABLE;
 import static java.lang.annotation.ElementType.METHOD;
@@ -37,7 +39,6 @@ import android.text.TextUtils;
 import androidx.annotation.ColorInt;
 import androidx.annotation.IntDef;
 import androidx.annotation.Nullable;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
@@ -273,9 +274,9 @@ public final class Cue {
   public final float size;
 
   /**
-   * The bitmap height as a fraction of the of the viewport size, or {@link #DIMEN_UNSET} if the
-   * bitmap should be displayed at its natural height given the bitmap dimensions and the specified
-   * {@link #size}.
+   * The bitmap height as a fraction of the viewport size, or {@link #DIMEN_UNSET} if the bitmap
+   * should be displayed at its natural height given the bitmap dimensions and the specified {@link
+   * #size}.
    */
   public final float bitmapHeight;
 
@@ -333,9 +334,9 @@ public final class Cue {
       int zIndex) {
     // Exactly one of text or bitmap should be set.
     if (text == null) {
-      Assertions.checkNotNull(bitmap);
+      checkNotNull(bitmap);
     } else {
-      Assertions.checkArgument(bitmap == null);
+      checkArgument(bitmap == null);
     }
     if (text instanceof Spanned) {
       this.text = SpannedString.valueOf(text);
@@ -490,11 +491,14 @@ public final class Cue {
      *
      * <p>Note that {@code text} may be decorated with styling spans.
      *
+     * <p>Note that this will also set the {@code bitmap} to null.
+     *
      * @see Cue#text
      */
     @CanIgnoreReturnValue
     public Builder setText(CharSequence text) {
       this.text = text;
+      this.bitmap = null;
       return this;
     }
 
@@ -512,11 +516,14 @@ public final class Cue {
     /**
      * Sets the cue image.
      *
+     * <p>Note that this will also set the {@code text} to null.
+     *
      * @see Cue#bitmap
      */
     @CanIgnoreReturnValue
     public Builder setBitmap(Bitmap bitmap) {
       this.bitmap = bitmap;
+      this.text = null;
       return this;
     }
 

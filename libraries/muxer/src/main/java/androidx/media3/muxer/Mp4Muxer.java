@@ -15,9 +15,6 @@
  */
 package androidx.media3.muxer;
 
-import static androidx.media3.common.util.Assertions.checkArgument;
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
 import static androidx.media3.muxer.Boxes.LARGE_SIZE_BOX_HEADER_SIZE;
 import static androidx.media3.muxer.Boxes.getAxteBoxHeader;
 import static androidx.media3.muxer.MuxerUtil.getAuxiliaryTracksLengthMetadata;
@@ -25,6 +22,10 @@ import static androidx.media3.muxer.MuxerUtil.getAuxiliaryTracksOffsetMetadata;
 import static androidx.media3.muxer.MuxerUtil.isAuxiliaryTrack;
 import static androidx.media3.muxer.MuxerUtil.isMetadataSupported;
 import static androidx.media3.muxer.MuxerUtil.populateAuxiliaryTracksMetadata;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkElementIndex;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.annotation.ElementType.TYPE_USE;
 
 import androidx.annotation.IntDef;
@@ -33,6 +34,7 @@ import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
+import androidx.media3.common.util.ExperimentalApi;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.container.MdtaMetadataEntry;
@@ -40,8 +42,8 @@ import androidx.media3.container.Mp4LocationData;
 import androidx.media3.container.Mp4OrientationData;
 import androidx.media3.container.Mp4TimestampData;
 import androidx.media3.container.XmpData;
+import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
-import com.google.common.io.ByteStreams;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -112,36 +114,16 @@ import org.checkerframework.checker.nullness.qual.EnsuresNonNull;
 public final class Mp4Muxer implements Muxer {
   /** Parameters for {@link #FILE_FORMAT_MP4_WITH_AUXILIARY_TRACKS_EXTENSION}. */
   public static final class Mp4AtFileParameters {
-    /** Provides temporary cache files to be used by the muxer. */
-    public interface CacheFileProvider {
-
-      /**
-       * Returns a cache file path.
-       *
-       * <p>Every call to this method should return a new cache file.
-       *
-       * <p>The app is responsible for deleting the cache file after {@linkplain Mp4Muxer#close()
-       * closing} the muxer.
-       */
-      String getCacheFilePath();
-    }
-
     public final boolean shouldInterleaveSamples;
-    @Nullable public final CacheFileProvider cacheFileProvider;
 
     /**
      * Creates an instance.
      *
      * @param shouldInterleaveSamples Whether to interleave auxiliary track samples with primary
      *     track samples.
-     * @param cacheFileProvider A {@link CacheFileProvider}. Required only when {@code
-     *     shouldInterleaveSamples} is set to {@code false}, can be {@code null} otherwise.
      */
-    public Mp4AtFileParameters(
-        boolean shouldInterleaveSamples, @Nullable CacheFileProvider cacheFileProvider) {
-      checkArgument(shouldInterleaveSamples || cacheFileProvider != null);
+    public Mp4AtFileParameters(boolean shouldInterleaveSamples) {
       this.shouldInterleaveSamples = shouldInterleaveSamples;
-      this.cacheFileProvider = cacheFileProvider;
     }
   }
 
@@ -197,10 +179,23 @@ public final class Mp4Muxer implements Muxer {
    */
   public static final int FILE_FORMAT_MP4_WITH_AUXILIARY_TRACKS_EXTENSION = 1;
 
+  /** A track reference type. */
+  @Documented
+  @Retention(RetentionPolicy.SOURCE)
+  @Target(TYPE_USE)
+  @IntDef({
+    TRACK_REFERENCE_TYPE_CDSC,
+  })
+  public @interface TrackReferenceType {}
+
+  /** Links a descriptive or metadata track to the content which it describes. */
+  public static final int TRACK_REFERENCE_TYPE_CDSC = 0x63647363;
+
   /** A builder for {@link Mp4Muxer} instances. */
   public static final class Builder {
-    private final FileOutputStream outputStream;
+    private final SeekableMuxerOutput seekableMuxerOutput;
 
+    @Nullable private Supplier<String> cacheFileSupplier;
     private @LastSampleDurationBehavior int lastSampleDurationBehavior;
     @Nullable private AnnexBToAvccConverter annexBToAvccConverter;
     private boolean sampleCopyEnabled;
@@ -211,17 +206,43 @@ public final class Mp4Muxer implements Muxer {
     private int freeSpaceAfterFtypInBytes;
 
     /**
-     * Creates a {@link Builder} instance with default values.
-     *
-     * @param outputStream The {@link FileOutputStream} to write the media data to. This stream will
-     *     be automatically closed by the muxer when {@link Mp4Muxer#close()} is called.
+     * @deprecated Use {@link Mp4Muxer.Builder#Builder(SeekableMuxerOutput)} instead.
      */
+    @Deprecated
     public Builder(FileOutputStream outputStream) {
-      this.outputStream = outputStream;
+      this(SeekableMuxerOutput.of(outputStream));
+    }
+
+    /**
+     * Creates an instance.
+     *
+     * @param seekableMuxerOutput A {@link SeekableMuxerOutput} to write output to. It will be
+     *     automatically {@linkplain SeekableMuxerOutput#close() closed} by the muxer when {@link
+     *     Muxer#close()} is called.
+     */
+    public Builder(SeekableMuxerOutput seekableMuxerOutput) {
+      this.seekableMuxerOutput = seekableMuxerOutput;
       lastSampleDurationBehavior =
           LAST_SAMPLE_DURATION_BEHAVIOR_SET_FROM_END_OF_STREAM_BUFFER_OR_DUPLICATE_PREVIOUS;
       attemptStreamableOutputEnabled = true;
       outputFileFormat = FILE_FORMAT_DEFAULT;
+    }
+
+    /**
+     * Sets a {@link Supplier} that provides an absolute path of a cache file.
+     *
+     * <p>Every call to {@link Supplier#get()} must return a new cache file path.
+     *
+     * <p>This must be set when {@link Mp4AtFileParameters#shouldInterleaveSamples} is set to {@code
+     * false}.
+     *
+     * <p>The app is responsible for deleting the cache file after {@linkplain Muxer#close()
+     * closing} the muxer.
+     */
+    @CanIgnoreReturnValue
+    public Mp4Muxer.Builder setCacheFileSupplier(Supplier<String> cacheFileSupplier) {
+      this.cacheFileSupplier = cacheFileSupplier;
+      return this;
     }
 
     /**
@@ -258,9 +279,9 @@ public final class Mp4Muxer implements Muxer {
      * to reuse them immediately. Otherwise, the muxer takes ownership of the {@link ByteBuffer} and
      * the {@link BufferInfo} and the caller must not modify them.
      *
-     * <p>When {@linkplain #setSampleBatchingEnabled(boolean) sample batching} is disabled, samples
-     * are written as they {@linkplain #writeSampleData(int, ByteBuffer, BufferInfo) arrive} and
-     * sample copying is disabled.
+     * <p>Note: Sample copying is only effective when {@link #setSampleBatchingEnabled(boolean)
+     * sample batching} is also enabled. If sample batching is disabled, samples are written
+     * immediately upon arrival, and copying is not performed, regardless of this setting.
      *
      * <p>The default value is {@code false}.
      */
@@ -278,10 +299,11 @@ public final class Mp4Muxer implements Muxer {
      * arrive}.
      *
      * <p>When sample batching is enabled, and {@linkplain #setSampleCopyingEnabled(boolean) sample
-     * copying} is disabled the {@link ByteBuffer} contents provided to {@link #writeSampleData(int,
-     * ByteBuffer, BufferInfo)} should not be modified. Otherwise, if sample batching is disabled or
-     * sample copying is enabled, the {@linkplain ByteBuffer sample data} contents can be modified
-     * after calling {@link #writeSampleData(int, ByteBuffer, BufferInfo)}.
+     * copying} is disabled the {@link ByteBuffer} and {@link BufferInfo} provided to {@link
+     * #writeSampleData(int, ByteBuffer, BufferInfo)} must not be modified. Otherwise, if sample
+     * batching is disabled or sample copying is enabled, the {@link ByteBuffer} and {@link
+     * BufferInfo} can be modified after calling {@link #writeSampleData(int, ByteBuffer,
+     * BufferInfo)}.
      *
      * <p>The default value is {@code false}.
      */
@@ -331,17 +353,14 @@ public final class Mp4Muxer implements Muxer {
      * Sets the amount of free space (in bytes) to be reserved immediately after the {@code ftyp}
      * box (File Type box) in the MP4 file.
      *
-     * <p>The {@code moov} box (Movie Box) is written in the reserved space if {@link
-     * #setAttemptStreamableOutputEnabled(boolean)} is set to {@code true}, and the size of the
-     * {@code moov} box is not greater than {@code bytes}. Otherwise, a {@code free} box of the
-     * requested size is written.
-     *
-     * <p>By default 400_000 bytes are reserved if {@link
-     * #setAttemptStreamableOutputEnabled(boolean)} is set to {@code true}.
+     * <p>A {@code free} box of the requested size is always written. If {@link
+     * #setAttemptStreamableOutputEnabled(boolean)} is set to {@code true}, an additional space is
+     * reserved for the {@code moov} box (Movie Box) which is written if it fits.
      *
      * <p>This method is experimental and will be renamed or removed in a future release.
      */
     @CanIgnoreReturnValue
+    @ExperimentalApi // TODO: b/470374355 - Remove or make non-experimental.
     public Mp4Muxer.Builder experimentalSetFreeSpaceAfterFileTypeBox(int bytes) {
       checkArgument(bytes >= 0);
       this.freeSpaceAfterFtypInBytes = bytes;
@@ -350,13 +369,18 @@ public final class Mp4Muxer implements Muxer {
 
     /** Builds an {@link Mp4Muxer} instance. */
     public Mp4Muxer build() {
-      checkArgument(
-          outputFileFormat == FILE_FORMAT_MP4_WITH_AUXILIARY_TRACKS_EXTENSION
-              ? mp4AtFileParameters != null
-              : mp4AtFileParameters == null,
-          "Mp4AtFileParameters must be set for FILE_FORMAT_MP4_WITH_AUXILIARY_TRACKS_EXTENSION");
+      if (outputFileFormat == FILE_FORMAT_MP4_WITH_AUXILIARY_TRACKS_EXTENSION) {
+        checkArgument(
+            mp4AtFileParameters != null,
+            "Mp4AtFileParameters must be set for FILE_FORMAT_MP4_WITH_AUXILIARY_TRACKS_EXTENSION");
+        checkArgument(
+            mp4AtFileParameters.shouldInterleaveSamples || cacheFileSupplier != null,
+            "CacheFileSupplier must be set when Mp4AtFileParameters.shouldInterleaveSamples is set"
+                + " to false");
+      }
       return new Mp4Muxer(
-          outputStream,
+          seekableMuxerOutput,
+          cacheFileSupplier,
           lastSampleDurationBehavior,
           annexBToAvccConverter == null ? AnnexBToAvccConverter.DEFAULT : annexBToAvccConverter,
           sampleCopyEnabled,
@@ -389,14 +413,15 @@ public final class Mp4Muxer implements Muxer {
           MimeTypes.AUDIO_AMR_WB,
           MimeTypes.AUDIO_OPUS,
           MimeTypes.AUDIO_VORBIS,
-          MimeTypes.AUDIO_RAW);
+          MimeTypes.AUDIO_RAW,
+          MimeTypes.AUDIO_IAMF);
 
   // LINT.ThenChange(Boxes.java:codec_specific_boxes)
 
   private static final String TAG = "Mp4Muxer";
 
-  private final FileOutputStream outputStream;
-  private final FileChannel outputChannel;
+  private final SeekableMuxerOutput muxerOutput;
+  @Nullable private final Supplier<String> cacheFileSupplier;
   private final @LastSampleDurationBehavior int lastSampleDurationBehavior;
   private final AnnexBToAvccConverter annexBToAvccConverter;
   private final boolean sampleCopyEnabled;
@@ -411,14 +436,15 @@ public final class Mp4Muxer implements Muxer {
   private final List<Track> auxiliaryTracks;
 
   @Nullable private String cacheFilePath;
-  @Nullable private FileOutputStream cacheFileOutputStream;
+  @Nullable private SeekableMuxerOutput cacheMuxerOutput;
   @Nullable private MetadataCollector auxiliaryTracksMetadataCollector;
   @Nullable private Mp4Writer auxiliaryTracksMp4Writer;
 
   private int nextTrackId;
 
   private Mp4Muxer(
-      FileOutputStream outputStream,
+      SeekableMuxerOutput seekableMuxerOutput,
+      @Nullable Supplier<String> cacheFileSupplier,
       @LastSampleDurationBehavior int lastFrameDurationBehavior,
       AnnexBToAvccConverter annexBToAvccConverter,
       boolean sampleCopyEnabled,
@@ -427,8 +453,8 @@ public final class Mp4Muxer implements Muxer {
       @FileFormat int outputFileFormat,
       @Nullable Mp4AtFileParameters mp4AtFileParameters,
       int freeSpaceAfterFtypInBytes) {
-    this.outputStream = outputStream;
-    outputChannel = outputStream.getChannel();
+    this.muxerOutput = seekableMuxerOutput;
+    this.cacheFileSupplier = cacheFileSupplier;
     this.lastSampleDurationBehavior = lastFrameDurationBehavior;
     this.annexBToAvccConverter = annexBToAvccConverter;
     this.sampleCopyEnabled = sampleBatchingEnabled && sampleCopyEnabled;
@@ -440,7 +466,7 @@ public final class Mp4Muxer implements Muxer {
     metadataCollector = new MetadataCollector();
     mp4Writer =
         new Mp4Writer(
-            outputChannel,
+            muxerOutput,
             metadataCollector,
             annexBToAvccConverter,
             lastFrameDurationBehavior,
@@ -459,6 +485,13 @@ public final class Mp4Muxer implements Muxer {
    * other tracks.
    *
    * <p>The order of tracks remains same in which they are added.
+   *
+   * <p>A metadata track ({@link C#TRACK_TYPE_METADATA}) or a track with an unknown type ({@link
+   * C#TRACK_TYPE_UNKNOWN}) is written as a text metadata track, unless the sample MIME type is
+   * {@link MimeTypes#APPLICATION_ITUT_T35}, in which case it is written as a T35 metadata track.
+   *
+   * <p>For a metadata track, it is recommended to {@linkplain #addTrackReference(int, int, List)
+   * add track reference}.
    *
    * @param format The {@link Format} for the track.
    * @return A unique track id. The track id is non-negative. It should be used in {@link
@@ -513,16 +546,38 @@ public final class Mp4Muxer implements Muxer {
   /**
    * {@inheritDoc}
    *
+   * <p>The muxer's handling of sample {@link ByteBuffer} and {@link BufferInfo} depends on the
+   * {@link Builder#setSampleBatchingEnabled(boolean) sample batching} and {@link
+   * Builder#setSampleCopyingEnabled(boolean) sample copying} settings:
+   *
+   * <ul>
+   *   <li>If {@linkplain Builder#setSampleBatchingEnabled(boolean) sample batching} is disabled:
+   *       Samples are written immediately upon arrival. The caller can safely modify or reuse these
+   *       objects immediately after this method returns.
+   *   <li>If {@linkplain Builder#setSampleBatchingEnabled(boolean) sample batching} is enabled:
+   *       <ul>
+   *         <li>If {@linkplain Builder#setSampleCopyingEnabled(boolean) sample copying} is enabled:
+   *             The muxer makes internal copies of the provided {@link ByteBuffer} and {@link
+   *             BufferInfo}. The caller can safely modify or reuse these objects immediately after
+   *             this method returns.
+   *         <li>If {@linkplain Builder#setSampleCopyingEnabled(boolean) sample copying} is
+   *             disabled: The muxer takes ownership of the {@link ByteBuffer} and {@link
+   *             BufferInfo}. The caller must not modify these objects after this method returns.
+   *       </ul>
+   * </ul>
+   *
    * @param trackId The track id for which this sample is being written.
-   * @param byteBuffer The encoded sample. The muxer takes ownership of the buffer if {@link
-   *     Builder#setSampleCopyingEnabled(boolean) sample copying} is disabled. Otherwise, the
-   *     position of the buffer is updated but the caller retains ownership.
+   * @param byteBuffer The encoded sample.
    * @param bufferInfo The {@link BufferInfo} related to this sample.
    * @throws MuxerException If an error occurs while writing data to the output file.
    */
   @Override
   public void writeSampleData(int trackId, ByteBuffer byteBuffer, BufferInfo bufferInfo)
       throws MuxerException {
+    checkArgument(trackId < trackIdToTrack.size(), "Track id is invalid");
+    checkNotNull(byteBuffer);
+    checkNotNull(bufferInfo);
+    checkArgument(byteBuffer.remaining() == bufferInfo.size);
     Track track = trackIdToTrack.get(trackId);
     try {
       if (auxiliaryTracks.contains(track)) {
@@ -565,6 +620,29 @@ public final class Mp4Muxer implements Muxer {
     metadataCollector.addMetadata(metadataEntry);
   }
 
+  /**
+   * Adds a track reference to establish a relationship between tracks in the MP4 file.
+   *
+   * <p>Track references are used to link one track to another. For example, a metadata track might
+   * reference a video track to indicate that the metadata describes the content of that video.
+   *
+   * @param trackId The track id of the track to which the reference is being added. This must be a
+   *     valid track id returned by {@link #addTrack(Format)}.
+   * @param referenceType The type of the reference, as defined by {@link TrackReferenceType}.
+   * @param referencedTrackIds The track ids of the tracks that are being referenced. These must
+   *     also be valid track ids returned by {@link #addTrack(Format)}.
+   */
+  public void addTrackReference(
+      int trackId, @TrackReferenceType int referenceType, List<Integer> referencedTrackIds) {
+    checkElementIndex(trackId, trackIdToTrack.size());
+    checkArgument(referenceType == TRACK_REFERENCE_TYPE_CDSC);
+    for (int i = 0; i < referencedTrackIds.size(); i++) {
+      checkElementIndex(referencedTrackIds.get(i), trackIdToTrack.size());
+    }
+    Track track = trackIdToTrack.get(trackId);
+    track.addTrackReference(referenceType, ImmutableList.copyOf(referencedTrackIds));
+  }
+
   @Override
   public void close() throws MuxerException {
     @Nullable MuxerException exception = null;
@@ -576,7 +654,7 @@ public final class Mp4Muxer implements Muxer {
       exception = new MuxerException("Failed to finish writing data", e);
     }
     try {
-      outputStream.close();
+      muxerOutput.close();
     } catch (IOException e) {
       if (exception == null) {
         exception = new MuxerException("Failed to close output stream", e);
@@ -584,9 +662,9 @@ public final class Mp4Muxer implements Muxer {
         Log.e(TAG, "Failed to close output stream", e);
       }
     }
-    if (cacheFileOutputStream != null) {
+    if (cacheMuxerOutput != null) {
       try {
-        cacheFileOutputStream.close();
+        cacheMuxerOutput.close();
       } catch (IOException e) {
         if (exception == null) {
           exception = new MuxerException("Failed to close the cache file output stream", e);
@@ -603,13 +681,12 @@ public final class Mp4Muxer implements Muxer {
   @EnsuresNonNull({"auxiliaryTracksMp4Writer"})
   private void ensureSetupForAuxiliaryTracks() throws FileNotFoundException {
     if (auxiliaryTracksMp4Writer == null) {
-      cacheFilePath =
-          checkNotNull(checkNotNull(mp4AtFileParameters).cacheFileProvider).getCacheFilePath();
-      cacheFileOutputStream = new FileOutputStream(cacheFilePath);
+      cacheFilePath = checkNotNull(cacheFileSupplier).get();
+      cacheMuxerOutput = SeekableMuxerOutput.of(cacheFilePath);
       auxiliaryTracksMetadataCollector = new MetadataCollector();
       auxiliaryTracksMp4Writer =
           new Mp4Writer(
-              cacheFileOutputStream.getChannel(),
+              cacheMuxerOutput,
               checkNotNull(auxiliaryTracksMetadataCollector),
               annexBToAvccConverter,
               lastSampleDurationBehavior,
@@ -637,19 +714,19 @@ public final class Mp4Muxer implements Muxer {
     // The exact offset is known after writing all the data in mp4Writer.
     MdtaMetadataEntry placeholderAuxiliaryTracksOffset = getAuxiliaryTracksOffsetMetadata(0L);
     if (auxiliaryTracksMp4Writer != null) {
-      long auxiliaryTracksDataSize = checkNotNull(cacheFileOutputStream).getChannel().size();
+      long auxiliaryTracksDataSize = checkNotNull(cacheMuxerOutput).getSize();
       long axteBoxSize = LARGE_SIZE_BOX_HEADER_SIZE + auxiliaryTracksDataSize;
       metadataCollector.addMetadata(getAuxiliaryTracksLengthMetadata(axteBoxSize));
       metadataCollector.addMetadata(placeholderAuxiliaryTracksOffset);
     }
     mp4Writer.finishWritingSamplesAndFinalizeMoovBox();
     if (auxiliaryTracksMp4Writer != null) {
-      long primaryVideoDataSize = outputChannel.size();
+      long primaryVideoDataSize = muxerOutput.getSize();
       metadataCollector.removeMdtaMetadataEntry(placeholderAuxiliaryTracksOffset);
       metadataCollector.addMetadata(getAuxiliaryTracksOffsetMetadata(primaryVideoDataSize));
       mp4Writer.finalizeMoovBox();
       checkState(
-          outputChannel.size() == primaryVideoDataSize,
+          muxerOutput.getSize() == primaryVideoDataSize,
           "The auxiliary tracks offset should remain the same");
     }
   }
@@ -659,10 +736,13 @@ public final class Mp4Muxer implements Muxer {
       // Auxiliary tracks were not added.
       return;
     }
-    outputChannel.position(outputChannel.size());
-    FileInputStream inputStream = new FileInputStream(checkNotNull(cacheFilePath));
-    outputChannel.write(getAxteBoxHeader(inputStream.getChannel().size()));
-    ByteStreams.copy(inputStream, outputStream);
-    inputStream.close();
+    muxerOutput.setPosition(muxerOutput.getSize());
+    try (FileInputStream cacheFileInputStream = new FileInputStream(checkNotNull(cacheFilePath))) {
+      FileChannel cacheFileChannel = cacheFileInputStream.getChannel();
+      long cacheFileSize = cacheFileChannel.size();
+      muxerOutput.write(getAxteBoxHeader(cacheFileSize));
+      // Copy data from the cache file to muxer output.
+      cacheFileChannel.transferTo(/* position= */ 0, cacheFileSize, muxerOutput);
+    }
   }
 }

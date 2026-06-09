@@ -72,6 +72,15 @@ public abstract class Mp4Box {
   @SuppressWarnings("ConstantCaseForConstants")
   public static final int TYPE_lhvC = 0x6C687643;
 
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_vvc1 = 0x76766331;
+
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_vvi1 = 0x76766931;
+
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_vvcC = 0x76766343;
+
   @SuppressWarnings("ConstantCaseForConstants")
   public static final int TYPE_vexu = 0x76657875;
 
@@ -113,6 +122,9 @@ public abstract class Mp4Box {
 
   @SuppressWarnings("ConstantCaseForConstants")
   public static final int TYPE_dvcC = 0x64766343;
+
+  @SuppressWarnings("ConstantCaseForConstants")
+  public static final int TYPE_dav1 = 0x64617631;
 
   @SuppressWarnings("ConstantCaseForConstants")
   public static final int TYPE_dvvC = 0x64767643;
@@ -214,6 +226,15 @@ public abstract class Mp4Box {
 
   @SuppressWarnings("ConstantCaseForConstants")
   public static final int TYPE_tfhd = 0x74666864;
+
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_tfra = 0x74667261;
+
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_mfro = 0x6d66726f;
+
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_mfra = 0x6d667261;
 
   @SuppressWarnings("ConstantCaseForConstants")
   public static final int TYPE_trex = 0x74726578;
@@ -336,6 +357,9 @@ public abstract class Mp4Box {
   public static final int TYPE_mp4v = 0x6d703476;
 
   @SuppressWarnings("ConstantCaseForConstants")
+  public static final int TYPE_mp4s = 0x6D703473;
+
+  @SuppressWarnings("ConstantCaseForConstants")
   public static final int TYPE_stts = 0x73747473;
 
   @SuppressWarnings("ConstantCaseForConstants")
@@ -389,6 +413,15 @@ public abstract class Mp4Box {
   @SuppressWarnings("ConstantCaseForConstants")
   public static final int TYPE_smta = 0x736d7461;
 
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_chpl = 0x6368706c;
+
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_tref = 0x74726566;
+
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_chap = 0x63686170;
+
   @SuppressWarnings("ConstantCaseForConstants")
   public static final int TYPE_saut = 0x73617574;
 
@@ -428,6 +461,9 @@ public abstract class Mp4Box {
   @SuppressWarnings("ConstantCaseForConstants")
   public static final int TYPE_mett = 0x6d657474;
 
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_it35 = 0x69743335;
+
   @SuppressWarnings("ConstantCaseForConstants")
   public static final int TYPE_alac = 0x616c6163;
 
@@ -466,6 +502,18 @@ public abstract class Mp4Box {
 
   @SuppressWarnings("ConstantCaseForConstants")
   public static final int TYPE_axte = 0x61787465;
+
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_ipcm = 0x6970636d;
+
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_fpcm = 0x6670636d;
+
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_pcmC = 0x70636d43;
+
+  @SuppressWarnings({"ConstantCaseForConstants", "IdentifierName"})
+  public static final int TYPE_free = 0x66726565;
 
   public final int type;
 

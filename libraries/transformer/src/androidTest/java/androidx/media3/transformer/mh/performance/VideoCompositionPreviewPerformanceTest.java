@@ -16,9 +16,9 @@
 
 package androidx.media3.transformer.mh.performance;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.transformer.AndroidTestUtil.MP4_ASSET;
+import static androidx.media3.test.utils.AssetInfo.MP4_ADVANCED_ASSET;
 import static androidx.test.core.app.ApplicationProvider.getApplicationContext;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.truth.Truth.assertThat;
 
 import android.app.Instrumentation;
@@ -52,6 +52,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 /** Performance tests for the composition previewing pipeline in {@link CompositionPlayer}. */
+@Ignore("Only intended to run on internal infra: b/396671260")
 @RunWith(AndroidJUnit4.class)
 public class VideoCompositionPreviewPerformanceTest {
 
@@ -98,10 +99,11 @@ public class VideoCompositionPreviewPerformanceTest {
           player.addListener(listener);
           player.setComposition(
               new Composition.Builder(
-                      new EditedMediaItemSequence.Builder(
-                              getClippedEditedMediaItem(MP4_ASSET.uri, new Contrast(.2f)),
-                              getClippedEditedMediaItem(MP4_ASSET.uri, new Contrast(-.2f)))
-                          .build())
+                      EditedMediaItemSequence.withAudioAndVideoFrom(
+                          ImmutableList.of(
+                              getClippedEditedMediaItem(MP4_ADVANCED_ASSET.uri, new Contrast(.2f)),
+                              getClippedEditedMediaItem(
+                                  MP4_ADVANCED_ASSET.uri, new Contrast(-.2f)))))
                   .build());
           player.prepare();
         });

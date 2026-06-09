@@ -15,8 +15,8 @@
  */
 package androidx.media3.container;
 
-import static androidx.media3.common.util.Assertions.checkArgument;
-import static androidx.media3.common.util.Assertions.checkState;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 
 import androidx.annotation.Nullable;
 import androidx.media3.common.Metadata;
@@ -119,7 +119,7 @@ public final class MdtaMetadataEntry implements Metadata.Entry {
     int numberOfTracks = value[1];
     List<Integer> trackTypes = new ArrayList<>();
     for (int i = 0; i < numberOfTracks; i++) {
-      trackTypes.add((int) value[i + 2]);
+      trackTypes.add(value[i + 2] & 0xFF);
     }
     return trackTypes;
   }

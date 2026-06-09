@@ -15,10 +15,11 @@
  */
 package androidx.media3.exoplayer.offline;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
 import static androidx.media3.common.util.Util.castNonNull;
 import static androidx.media3.common.util.Util.getFormatSupportString;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.Math.min;
 import static java.lang.annotation.ElementType.TYPE_USE;
 import static java.lang.annotation.RetentionPolicy.SOURCE;
@@ -39,13 +40,11 @@ import androidx.media3.common.TrackGroup;
 import androidx.media3.common.TrackSelectionOverride;
 import androidx.media3.common.TrackSelectionParameters;
 import androidx.media3.common.Tracks;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.datasource.DataSource;
-import androidx.media3.datasource.TransferListener;
 import androidx.media3.datasource.cache.Cache;
 import androidx.media3.datasource.cache.CacheDataSource;
 import androidx.media3.exoplayer.DefaultRendererCapabilitiesList;
@@ -75,8 +74,10 @@ import androidx.media3.exoplayer.trackselection.TrackSelectorResult;
 import androidx.media3.exoplayer.upstream.Allocator;
 import androidx.media3.exoplayer.upstream.BandwidthMeter;
 import androidx.media3.exoplayer.upstream.DefaultAllocator;
+import androidx.media3.exoplayer.util.ReleasableExecutor;
 import androidx.media3.extractor.ExtractorsFactory;
 import androidx.media3.extractor.SeekMap;
+import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.io.IOException;
@@ -99,7 +100,7 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
  * <p>A typical usage of DownloadHelper follows these steps:
  *
  * <ol>
- *   <li>Build the helper using one of the {@code forMediaItem} methods.
+ *   <li>Build the helper using a {@link Factory} instance.
  *   <li>Prepare the helper using {@link #prepare(Callback)} and wait for the callback.
  *   <li>Optional: Inspect the selected tracks using {@link #getMappedTrackInfo(int)} and {@link
  *       #getTrackSelections(int, int)}, and make adjustments using {@link
@@ -118,11 +119,13 @@ public final class DownloadHelper {
     @Nullable private RenderersFactory renderersFactory;
     private TrackSelectionParameters trackSelectionParameters;
     @Nullable private DrmSessionManager drmSessionManager;
+    @Nullable private Supplier<ReleasableExecutor> loadExecutorSupplier;
     private boolean debugLoggingEnabled;
 
     /** Creates a {@link Factory}. */
     public Factory() {
       this.trackSelectionParameters = DEFAULT_TRACK_SELECTOR_PARAMETERS;
+      loadExecutorSupplier = null;
     }
 
     /**
@@ -182,6 +185,19 @@ public final class DownloadHelper {
     }
 
     /**
+     * Sets a supplier for an {@link ReleasableExecutor} that is used for loading the media.
+     *
+     * @param loadExecutor A {@link Supplier} that provides an externally managed {@link
+     *     ReleasableExecutor} for loading.
+     * @return This factory, for convenience.
+     */
+    @CanIgnoreReturnValue
+    public Factory setLoadExecutor(Supplier<ReleasableExecutor> loadExecutor) {
+      this.loadExecutorSupplier = loadExecutor;
+      return this;
+    }
+
+    /**
      * Sets whether to log debug information. The default is {@code false}.
      *
      * @return This factory, for convenience.
@@ -203,13 +219,16 @@ public final class DownloadHelper {
      */
     public DownloadHelper create(MediaItem mediaItem) {
       boolean isProgressive = isProgressive(checkNotNull(mediaItem.localConfiguration));
-      Assertions.checkArgument(isProgressive || dataSourceFactory != null);
+      checkArgument(isProgressive || dataSourceFactory != null);
       return new DownloadHelper(
           mediaItem,
           isProgressive && dataSourceFactory == null
               ? null
               : createMediaSourceInternal(
-                  mediaItem, castNonNull(dataSourceFactory), drmSessionManager),
+                  mediaItem,
+                  castNonNull(dataSourceFactory),
+                  drmSessionManager,
+                  loadExecutorSupplier),
           trackSelectionParameters,
           renderersFactory != null
               ? new DefaultRendererCapabilitiesList.Factory(renderersFactory)
@@ -305,7 +324,7 @@ public final class DownloadHelper {
    */
   @Deprecated
   public static DownloadHelper forMediaItem(Context context, MediaItem mediaItem) {
-    Assertions.checkArgument(isProgressive(checkNotNull(mediaItem.localConfiguration)));
+    checkArgument(isProgressive(checkNotNull(mediaItem.localConfiguration)));
     return new DownloadHelper.Factory().create(mediaItem);
   }
 
@@ -461,7 +480,10 @@ public final class DownloadHelper {
       DataSource.Factory dataSourceFactory,
       @Nullable DrmSessionManager drmSessionManager) {
     return createMediaSourceInternal(
-        downloadRequest.toMediaItem(), dataSourceFactory, drmSessionManager);
+        downloadRequest.toMediaItem(),
+        dataSourceFactory,
+        drmSessionManager,
+        /* loadExecutorSupplier= */ null);
   }
 
   private static final String TAG = "DownloadHelper";
@@ -541,7 +563,7 @@ public final class DownloadHelper {
     this.rendererCapabilities = rendererCapabilities;
     this.debugLoggingEnabled = debugLoggingEnabled;
     this.scratchSet = new SparseIntArray();
-    trackSelector.init(/* listener= */ () -> {}, new FakeBandwidthMeter());
+    trackSelector.init(/* listener= */ () -> {}, BandwidthMeter.NO_OP);
     callbackHandler = Util.createHandlerForCurrentOrMainLooper();
     window = new Timeline.Window();
   }
@@ -553,7 +575,7 @@ public final class DownloadHelper {
    * @throws IllegalStateException If the download helper has already been prepared.
    */
   public void prepare(Callback callback) {
-    Assertions.checkState(this.callback == null);
+    checkState(this.callback == null);
     this.callback = callback;
     if (mode != MODE_NOT_PREPARE) {
       mediaPreparer = new MediaPreparer(checkNotNull(mediaSource), /* downloadHelper= */ this);
@@ -1094,8 +1116,8 @@ public final class DownloadHelper {
   @EnsuresNonNull({"mediaPreparer", "mediaPreparer.timeline", "mediaPreparer.mediaPeriods"})
   @SuppressWarnings("nullness:contracts.postcondition")
   private void assertPreparedWithMedia() {
-    Assertions.checkState(mode != MODE_NOT_PREPARE);
-    Assertions.checkState(isPreparedWithMedia);
+    checkState(mode != MODE_NOT_PREPARE);
+    checkState(isPreparedWithMedia);
   }
 
   @EnsuresNonNull({
@@ -1109,9 +1131,9 @@ public final class DownloadHelper {
   })
   @SuppressWarnings("nullness:contracts.postcondition")
   private void assertPreparedWithNonProgressiveSourceAndTracksSelected() {
-    Assertions.checkState(mode == MODE_PREPARE_NON_PROGRESSIVE_SOURCE_AND_SELECT_TRACKS);
-    Assertions.checkState(isPreparedWithMedia);
-    Assertions.checkState(areTracksSelected);
+    checkState(mode == MODE_PREPARE_NON_PROGRESSIVE_SOURCE_AND_SELECT_TRACKS);
+    checkState(isPreparedWithMedia);
+    checkState(areTracksSelected);
   }
 
   @EnsuresNonNull({
@@ -1122,8 +1144,8 @@ public final class DownloadHelper {
   })
   @SuppressWarnings("nullness:contracts.postcondition")
   private void assertPreparedWithProgressiveSource() {
-    Assertions.checkState(mode == MODE_PREPARE_PROGRESSIVE_SOURCE);
-    Assertions.checkState(isPreparedWithMedia);
+    checkState(mode == MODE_PREPARE_PROGRESSIVE_SOURCE);
+    checkState(isPreparedWithMedia);
   }
 
   /**
@@ -1185,11 +1207,15 @@ public final class DownloadHelper {
   private static MediaSource createMediaSourceInternal(
       MediaItem mediaItem,
       DataSource.Factory dataSourceFactory,
-      @Nullable DrmSessionManager drmSessionManager) {
+      @Nullable DrmSessionManager drmSessionManager,
+      @Nullable Supplier<ReleasableExecutor> loadExecutorSupplier) {
     MediaSource.Factory mediaSourceFactory =
         isProgressive(checkNotNull(mediaItem.localConfiguration))
             ? new ProgressiveMediaSource.Factory(dataSourceFactory)
             : new DefaultMediaSourceFactory(dataSourceFactory, ExtractorsFactory.EMPTY);
+    if (loadExecutorSupplier != null) {
+      mediaSourceFactory.setDownloadExecutor(loadExecutorSupplier);
+    }
     if (drmSessionManager != null) {
       mediaSourceFactory.setDrmSessionManagerProvider(unusedMediaItem -> drmSessionManager);
     }
@@ -1288,8 +1314,7 @@ public final class DownloadHelper {
           if (mediaSource instanceof ProgressiveMediaSource) {
             ((ProgressiveMediaSource) mediaSource).setListener(this);
           }
-          mediaSource.prepareSource(
-              /* caller= */ this, /* mediaTransferListener= */ null, PlayerId.UNSET);
+          mediaSource.prepareSource(/* caller= */ this, PlayerId.UNSET, BandwidthMeter.NO_OP);
           mediaSourceHandler.sendEmptyMessage(MESSAGE_CHECK_FOR_FAILURE);
           return true;
         case MESSAGE_CHECK_FOR_FAILURE:
@@ -1464,30 +1489,6 @@ public final class DownloadHelper {
         long availableDurationUs,
         List<? extends MediaChunk> queue,
         MediaChunkIterator[] mediaChunkIterators) {
-      // Do nothing.
-    }
-  }
-
-  private static final class FakeBandwidthMeter implements BandwidthMeter {
-
-    @Override
-    public long getBitrateEstimate() {
-      return 0;
-    }
-
-    @Override
-    @Nullable
-    public TransferListener getTransferListener() {
-      return null;
-    }
-
-    @Override
-    public void addEventListener(Handler eventHandler, EventListener eventListener) {
-      // Do nothing.
-    }
-
-    @Override
-    public void removeEventListener(EventListener eventListener) {
       // Do nothing.
     }
   }

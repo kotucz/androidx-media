@@ -15,6 +15,8 @@
  */
 package androidx.media3.demo.cast;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import android.content.Context;
 import android.os.Bundle;
 import android.view.KeyEvent;
@@ -31,9 +33,9 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.ColorUtils;
+import androidx.media3.cast.MediaRouteButtonFactory;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.Util;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.ui.PlayerView;
@@ -41,10 +43,6 @@ import androidx.recyclerview.widget.ItemTouchHelper;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.recyclerview.widget.RecyclerView.ViewHolder;
-import com.google.android.gms.cast.framework.CastButtonFactory;
-import com.google.android.gms.cast.framework.CastContext;
-import com.google.android.gms.dynamite.DynamiteModule;
-import com.google.common.util.concurrent.MoreExecutors;
 
 /**
  * An activity that plays video using {@link ExoPlayer} and supports casting using ExoPlayer's Cast
@@ -57,29 +55,12 @@ public class MainActivity extends AppCompatActivity
   private PlayerManager playerManager;
   private RecyclerView mediaQueueList;
   private MediaQueueListAdapter mediaQueueListAdapter;
-  private CastContext castContext;
 
   // Activity lifecycle methods.
 
   @Override
   public void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
-    // Getting the cast context later than onStart can cause device discovery not to take place.
-    try {
-      castContext = CastContext.getSharedInstance(this, MoreExecutors.directExecutor()).getResult();
-    } catch (RuntimeException e) {
-      Throwable cause = e.getCause();
-      while (cause != null) {
-        if (cause instanceof DynamiteModule.LoadingException) {
-          setContentView(R.layout.cast_context_error);
-          return;
-        }
-        cause = cause.getCause();
-      }
-      // Unknown error. We propagate it.
-      throw e;
-    }
-
     setContentView(R.layout.main_activity);
 
     playerView = findViewById(R.id.player_view);
@@ -99,29 +80,20 @@ public class MainActivity extends AppCompatActivity
   public boolean onCreateOptionsMenu(Menu menu) {
     super.onCreateOptionsMenu(menu);
     getMenuInflater().inflate(R.menu.menu, menu);
-    CastButtonFactory.setUpMediaRouteButton(this, menu, R.id.media_route_menu_item);
+    MediaRouteButtonFactory.setUpMediaRouteButton(this, menu, R.id.media_route_menu_item);
     return true;
   }
 
   @Override
   public void onResume() {
     super.onResume();
-    if (castContext == null) {
-      // There is no Cast context to work with. Do nothing.
-      return;
-    }
-    playerManager =
-        new PlayerManager(/* listener= */ this, this, playerView, /* context= */ castContext);
+    playerManager = new PlayerManager(/* listener= */ this, this, playerView);
     mediaQueueList.setAdapter(mediaQueueListAdapter);
   }
 
   @Override
   public void onPause() {
     super.onPause();
-    if (castContext == null) {
-      // Nothing to release.
-      return;
-    }
     mediaQueueListAdapter.notifyItemRangeRemoved(0, mediaQueueListAdapter.getItemCount());
     mediaQueueList.setAdapter(null);
     playerManager.release();
@@ -200,7 +172,7 @@ public class MainActivity extends AppCompatActivity
 
     @Override
     public void onBindViewHolder(QueueItemViewHolder holder, int position) {
-      holder.item = Assertions.checkNotNull(playerManager.getItem(position));
+      holder.item = checkNotNull(playerManager.getItem(position));
 
       TextView view = holder.textView;
       view.setText(holder.item.mediaMetadata.title);

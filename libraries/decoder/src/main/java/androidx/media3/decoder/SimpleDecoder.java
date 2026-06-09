@@ -15,12 +15,15 @@
  */
 package androidx.media3.decoder;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 import androidx.annotation.CallSuper;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.UnstableApi;
 import java.util.ArrayDeque;
+import java.util.concurrent.Executor;
 
 /**
  * Base class for {@link Decoder}s that use their own decode thread and decode each input buffer
@@ -49,6 +52,9 @@ public abstract class SimpleDecoder<
   private boolean released;
   private int skippedOutputBufferCount;
   private long outputStartTimeUs;
+
+  @Nullable private Callback callback;
+  @Nullable private Executor executor;
 
   /**
    * @param inputBuffers An array of nulls that will be used to store references to input buffers.
@@ -89,7 +95,7 @@ public abstract class SimpleDecoder<
    * @param size The required input buffer size.
    */
   protected final void setInitialInputBufferSize(int size) {
-    Assertions.checkState(availableInputBufferCount == availableInputBuffers.length);
+    checkState(availableInputBufferCount == availableInputBuffers.length);
     for (I inputBuffer : availableInputBuffers) {
       inputBuffer.ensureSpaceForWrite(size);
     }
@@ -114,8 +120,16 @@ public abstract class SimpleDecoder<
   @Override
   public final void setOutputStartTimeUs(long outputStartTimeUs) {
     synchronized (lock) {
-      Assertions.checkState(availableInputBufferCount == availableInputBuffers.length || flushed);
+      checkState(availableInputBufferCount == availableInputBuffers.length || flushed);
       this.outputStartTimeUs = outputStartTimeUs;
+    }
+  }
+
+  @Override
+  public final void setCallback(Callback callback, Executor executor) {
+    synchronized (lock) {
+      this.callback = callback;
+      this.executor = executor;
     }
   }
 
@@ -124,7 +138,7 @@ public abstract class SimpleDecoder<
   public final I dequeueInputBuffer() throws E {
     synchronized (lock) {
       maybeThrowException();
-      Assertions.checkState(dequeuedInputBuffer == null);
+      checkState(dequeuedInputBuffer == null);
       dequeuedInputBuffer =
           availableInputBufferCount == 0
               ? null
@@ -137,7 +151,7 @@ public abstract class SimpleDecoder<
   public final void queueInputBuffer(I inputBuffer) throws E {
     synchronized (lock) {
       maybeThrowException();
-      Assertions.checkArgument(inputBuffer == dequeuedInputBuffer);
+      checkArgument(inputBuffer == dequeuedInputBuffer);
       queuedInputBuffers.addLast(inputBuffer);
       maybeNotifyDecodeLoop();
       dequeuedInputBuffer = null;
@@ -175,11 +189,11 @@ public abstract class SimpleDecoder<
       flushed = true;
       skippedOutputBufferCount = 0;
       if (dequeuedInputBuffer != null) {
-        releaseInputBufferInternal(dequeuedInputBuffer);
+        releaseInputBufferInternal(dequeuedInputBuffer, /* notifyCallback= */ false);
         dequeuedInputBuffer = null;
       }
       while (!queuedInputBuffers.isEmpty()) {
-        releaseInputBufferInternal(queuedInputBuffers.removeFirst());
+        releaseInputBufferInternal(queuedInputBuffers.removeFirst(), /* notifyCallback= */ false);
       }
       while (!queuedOutputBuffers.isEmpty()) {
         queuedOutputBuffers.removeFirst().release();
@@ -296,9 +310,14 @@ public abstract class SimpleDecoder<
         outputBuffer.skippedOutputBufferCount = skippedOutputBufferCount;
         skippedOutputBufferCount = 0;
         queuedOutputBuffers.addLast(outputBuffer);
+        Decoder.Callback currentCallback = this.callback;
+        Executor currentExecutor = this.executor;
+        if (currentCallback != null && currentExecutor != null) {
+          currentExecutor.execute(currentCallback::onOutputBufferAvailable);
+        }
       }
       // Make the input buffer available again.
-      releaseInputBufferInternal(inputBuffer);
+      releaseInputBufferInternal(inputBuffer, /* notifyCallback= */ true);
     }
 
     return true;
@@ -308,9 +327,14 @@ public abstract class SimpleDecoder<
     return !queuedInputBuffers.isEmpty() && availableOutputBufferCount > 0;
   }
 
-  private void releaseInputBufferInternal(I inputBuffer) {
+  private void releaseInputBufferInternal(I inputBuffer, boolean notifyCallback) {
     inputBuffer.clear();
     availableInputBuffers[availableInputBufferCount++] = inputBuffer;
+    Decoder.Callback currentCallback = this.callback;
+    Executor currentExecutor = this.executor;
+    if (notifyCallback && currentCallback != null && currentExecutor != null) {
+      currentExecutor.execute(currentCallback::onInputBufferAvailable);
+    }
   }
 
   private void releaseOutputBufferInternal(O outputBuffer) {

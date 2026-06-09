@@ -41,28 +41,12 @@ import org.robolectric.ParameterizedRobolectricTestRunner.Parameters;
 @RunWith(ParameterizedRobolectricTestRunner.class)
 public final class FragmentedMp4ExtractorParameterizedTest {
 
-  @Parameters(name = "{0},subtitlesParsedDuringExtraction={1},readWithinGopSampleDependencies={2}")
+  @Parameters(name = "{0},subtitlesParsedDuringExtraction={1}")
   public static List<Object[]> params() {
     List<Object[]> parameterList = new ArrayList<>();
     for (ExtractorAsserts.SimulationConfig config : ExtractorAsserts.configs()) {
-      parameterList.add(
-          new Object[] {
-            config,
-            /* subtitlesParsedDuringExtraction */ true,
-            /* readWithinGopSampleDependencies */ false
-          });
-      parameterList.add(
-          new Object[] {
-            config,
-            /* subtitlesParsedDuringExtraction */ false,
-            /* readWithinGopSampleDependencies */ false
-          });
-      parameterList.add(
-          new Object[] {
-            config,
-            /* subtitlesParsedDuringExtraction */ true,
-            /* readWithinGopSampleDependencies */ true
-          });
+      parameterList.add(new Object[] {config, /* subtitlesParsedDuringExtraction */ true});
+      parameterList.add(new Object[] {config, /* subtitlesParsedDuringExtraction */ false});
     }
     return parameterList;
   }
@@ -73,19 +57,20 @@ public final class FragmentedMp4ExtractorParameterizedTest {
   @Parameter(1)
   public boolean subtitlesParsedDuringExtraction;
 
-  @Parameter(2)
-  public boolean readWithinGopSampleDependencies;
-
   @Test
   public void sample() throws Exception {
     assertExtractorBehavior(
-        /* closedCaptionFormats= */ ImmutableList.of(), "media/mp4/sample_fragmented.mp4");
+        /* closedCaptionFormats= */ ImmutableList.of(),
+        "media/mp4/sample_fragmented.mp4",
+        /* peekLimit= */ 1100);
   }
 
   @Test
   public void sampleSeekable() throws Exception {
     assertExtractorBehavior(
-        /* closedCaptionFormats= */ ImmutableList.of(), "media/mp4/sample_fragmented_seekable.mp4");
+        /* closedCaptionFormats= */ ImmutableList.of(),
+        "media/mp4/sample_fragmented_seekable.mp4",
+        /* peekLimit= */ 260);
   }
 
   @Test
@@ -95,16 +80,14 @@ public final class FragmentedMp4ExtractorParameterizedTest {
         () ->
             new FragmentedMp4Extractor(
                 /* subtitleParserFactory= */ new DefaultSubtitleParserFactory(),
-                /* flags= */ 0,
+                /* flags= */ FragmentedMp4Extractor.FLAG_READ_MFRA_FOR_SEEK_MAP,
                 /* timestampAdjuster= */ null,
                 /* sideloadedTrack= */ null,
                 /* closedCaptionFormats= */ ImmutableList.of(),
                 /* additionalEmsgTrackOutput= */ null),
         file,
-        new ExtractorAsserts.AssertionConfig.Builder()
-            .setDumpFilesPrefix(
-                file.replaceFirst("media", "extractordumps") + ".no-merge-fragmented-sidx")
-            .build(),
+        /* peekLimit= */ 700,
+        new ExtractorAsserts.AssertionConfig.Builder().build(),
         simulationConfig);
   }
 
@@ -115,16 +98,15 @@ public final class FragmentedMp4ExtractorParameterizedTest {
         () ->
             new FragmentedMp4Extractor(
                 /* subtitleParserFactory= */ new DefaultSubtitleParserFactory(),
-                /* flags= */ FragmentedMp4Extractor.FLAG_MERGE_FRAGMENTED_SIDX,
+                /* flags= */ FragmentedMp4Extractor.FLAG_MERGE_FRAGMENTED_SIDX
+                    | FragmentedMp4Extractor.FLAG_READ_MFRA_FOR_SEEK_MAP,
                 /* timestampAdjuster= */ null,
                 /* sideloadedTrack= */ null,
                 /* closedCaptionFormats= */ ImmutableList.of(),
                 /* additionalEmsgTrackOutput= */ null),
         file,
-        new ExtractorAsserts.AssertionConfig.Builder()
-            .setDumpFilesPrefix(
-                file.replaceFirst("media", "extractordumps") + ".merge-fragmented-sidx")
-            .build(),
+        /* peekLimit= */ 700,
+        new ExtractorAsserts.AssertionConfig.Builder().build(),
         simulationConfig);
   }
 
@@ -135,7 +117,8 @@ public final class FragmentedMp4ExtractorParameterizedTest {
         Collections.singletonList(
             new Format.Builder().setSampleMimeType(MimeTypes.APPLICATION_CEA608).build());
 
-    assertExtractorBehavior(closedCaptions, "media/mp4/sample_fragmented_sei.mp4");
+    assertExtractorBehavior(
+        closedCaptions, "media/mp4/sample_fragmented_sei.mp4", /* peekLimit= */ 1100);
   }
 
   @Test
@@ -145,57 +128,88 @@ public final class FragmentedMp4ExtractorParameterizedTest {
         Collections.singletonList(
             new Format.Builder().setSampleMimeType(MimeTypes.APPLICATION_CEA608).build());
 
-    assertExtractorBehavior(closedCaptions, "media/mp4/fragmented_captions.mp4");
+    assertExtractorBehavior(
+        closedCaptions, "media/mp4/fragmented_captions.mp4", /* peekLimit= */ 660);
   }
 
   @Test
   public void sampleWithAc3Track() throws Exception {
     assertExtractorBehavior(
-        /* closedCaptionFormats= */ ImmutableList.of(), "media/mp4/sample_ac3_fragmented.mp4");
+        /* closedCaptionFormats= */ ImmutableList.of(),
+        "media/mp4/sample_ac3_fragmented.mp4",
+        /* peekLimit= */ 550);
   }
 
   @Test
   public void sampleWithAc4Track() throws Exception {
     assertExtractorBehavior(
-        /* closedCaptionFormats= */ ImmutableList.of(), "media/mp4/sample_ac4_fragmented.mp4");
+        /* closedCaptionFormats= */ ImmutableList.of(),
+        "media/mp4/sample_ac4_fragmented.mp4",
+        /* peekLimit= */ 600);
   }
 
   @Test
   public void sampleWithAc4Level4Track() throws Exception {
     assertExtractorBehavior(
         /* closedCaptionFormats= */ ImmutableList.of(),
-        "media/mp4/sample_ac4_level4_fragmented.mp4");
+        "media/mp4/sample_ac4_level4_fragmented.mp4",
+        /* peekLimit= */ 580);
   }
 
   @Test
   public void sampleWithProtectedAc4Track() throws Exception {
     assertExtractorBehavior(
-        /* closedCaptionFormats= */ ImmutableList.of(), "media/mp4/sample_ac4_protected.mp4");
+        /* closedCaptionFormats= */ ImmutableList.of(),
+        "media/mp4/sample_ac4_protected.mp4",
+        /* peekLimit= */ 810);
   }
 
   @Test
   public void sampleWithEac3Track() throws Exception {
     assertExtractorBehavior(
-        /* closedCaptionFormats= */ ImmutableList.of(), "media/mp4/sample_eac3_fragmented.mp4");
+        /* closedCaptionFormats= */ ImmutableList.of(),
+        "media/mp4/sample_eac3_fragmented.mp4",
+        /* peekLimit= */ 550);
   }
 
   @Test
   public void sampleWithEac3jocTrack() throws Exception {
     assertExtractorBehavior(
-        /* closedCaptionFormats= */ ImmutableList.of(), "media/mp4/sample_eac3joc_fragmented.mp4");
+        /* closedCaptionFormats= */ ImmutableList.of(),
+        "media/mp4/sample_eac3joc_fragmented.mp4",
+        /* peekLimit= */ 550);
   }
 
   @Test
   public void sampleWithOpusTrack() throws Exception {
     assertExtractorBehavior(
-        /* closedCaptionFormats= */ ImmutableList.of(), "media/mp4/sample_opus_fragmented.mp4");
+        /* closedCaptionFormats= */ ImmutableList.of(),
+        "media/mp4/sample_opus_fragmented.mp4",
+        /* peekLimit= */ 540);
+  }
+
+  @Test
+  public void sampleWithDtsExpress() throws Exception {
+    assertExtractorBehavior(
+        /* closedCaptionFormats= */ ImmutableList.of(),
+        "media/mp4/sample_fragmented_dts_express.mp4",
+        /* peekLimit= */ 4096);
+  }
+
+  @Test
+  public void sampleWithDtsHdMa() throws Exception {
+    assertExtractorBehavior(
+        /* closedCaptionFormats= */ ImmutableList.of(),
+        "media/mp4/sample_fragmented_dts_hd_ma.mp4",
+        /* peekLimit= */ 4096);
   }
 
   @Test
   public void samplePartiallyFragmented() throws Exception {
     assertExtractorBehavior(
         /* closedCaptionFormats= */ ImmutableList.of(),
-        "media/mp4/sample_partially_fragmented.mp4");
+        "media/mp4/sample_partially_fragmented.mp4",
+        /* peekLimit= */ 1300);
   }
 
   /** https://github.com/google/ExoPlayer/issues/10381 */
@@ -203,41 +217,48 @@ public final class FragmentedMp4ExtractorParameterizedTest {
   public void sampleWithLargeBitrates() throws Exception {
     assertExtractorBehavior(
         /* closedCaptionFormats= */ ImmutableList.of(),
-        "media/mp4/sample_fragmented_large_bitrates.mp4");
+        "media/mp4/sample_fragmented_large_bitrates.mp4",
+        /* peekLimit= */ 260);
   }
 
   @Test
   public void sampleWithMhm1BlCicp1Track() throws Exception {
     assertExtractorBehavior(
         /* closedCaptionFormats= */ ImmutableList.of(),
-        "media/mp4/sample_mhm1_bl_cicp1_fragmented.mp4");
+        "media/mp4/sample_mhm1_bl_cicp1_fragmented.mp4",
+        /* peekLimit= */ 610);
   }
 
   @Test
   public void sampleWithMhm1LcblCicp1Track() throws Exception {
     assertExtractorBehavior(
         /* closedCaptionFormats= */ ImmutableList.of(),
-        "media/mp4/sample_mhm1_lcbl_cicp1_fragmented.mp4");
+        "media/mp4/sample_mhm1_lcbl_cicp1_fragmented.mp4",
+        /* peekLimit= */ 620);
   }
 
   @Test
   public void sampleWithMhm1BlConfigChangeTrack() throws Exception {
     assertExtractorBehavior(
         /* closedCaptionFormats= */ ImmutableList.of(),
-        "media/mp4/sample_mhm1_bl_configchange_fragmented.mp4");
+        "media/mp4/sample_mhm1_bl_configchange_fragmented.mp4",
+        /* peekLimit= */ 610);
   }
 
   @Test
   public void sampleWithMhm1LcblConfigChangeTrack() throws Exception {
     assertExtractorBehavior(
         /* closedCaptionFormats= */ ImmutableList.of(),
-        "media/mp4/sample_mhm1_lcbl_configchange_fragmented.mp4");
+        "media/mp4/sample_mhm1_lcbl_configchange_fragmented.mp4",
+        /* peekLimit= */ 620);
   }
 
   @Test
   public void sampleWithIamfTrack() throws Exception {
     assertExtractorBehavior(
-        /* closedCaptionFormats= */ ImmutableList.of(), "media/mp4/sample_fragmented_iamf.mp4");
+        /* closedCaptionFormats= */ ImmutableList.of(),
+        "media/mp4/sample_fragmented_iamf.mp4",
+        /* peekLimit= */ 150);
   }
 
   @Test
@@ -247,44 +268,44 @@ public final class FragmentedMp4ExtractorParameterizedTest {
         Collections.singletonList(
             new Format.Builder().setSampleMimeType(MimeTypes.APPLICATION_CEA608).build());
 
-    assertExtractorBehavior(closedCaptions, "media/mp4/fragmented_captions_h265.mp4");
+    assertExtractorBehavior(
+        closedCaptions, "media/mp4/fragmented_captions_h265.mp4", /* peekLimit= */ 3100);
   }
 
-  private void assertExtractorBehavior(List<Format> closedCaptionFormats, String file)
-      throws IOException {
+  @Test
+  public void sampleWithUuidBoxBeforeMoov() throws Exception {
+    assertExtractorBehavior(
+        /* closedCaptionFormats= */ ImmutableList.of(),
+        "media/mp4/sample_fragmented_uuid.mp4",
+        /* peekLimit= */ 9276);
+  }
+
+  private void assertExtractorBehavior(
+      List<Format> closedCaptionFormats, String file, int peekLimit) throws IOException {
     ExtractorAsserts.AssertionConfig.Builder assertionConfigBuilder =
         new ExtractorAsserts.AssertionConfig.Builder();
-    if (readWithinGopSampleDependencies) {
-      String dumpFilesPrefix =
-          file.replaceFirst("media", "extractordumps") + ".reading_within_gop_sample_dependencies";
-      assertionConfigBuilder.setDumpFilesPrefix(dumpFilesPrefix);
-    }
     ExtractorAsserts.assertBehavior(
-        getExtractorFactory(
-            closedCaptionFormats, subtitlesParsedDuringExtraction, readWithinGopSampleDependencies),
+        getExtractorFactory(closedCaptionFormats, subtitlesParsedDuringExtraction),
         file,
+        peekLimit,
         assertionConfigBuilder.build(),
         simulationConfig);
   }
 
   private static ExtractorFactory getExtractorFactory(
-      List<Format> closedCaptionFormats,
-      boolean subtitlesParsedDuringExtraction,
-      boolean readWithinGopSampleDependencies) {
+      List<Format> closedCaptionFormats, boolean subtitlesParsedDuringExtraction) {
     SubtitleParser.Factory subtitleParserFactory;
-    @FragmentedMp4Extractor.Flags int flags;
+    @FragmentedMp4Extractor.Flags
+    int flags =
+        FragmentedMp4Extractor.FLAG_READ_MFRA_FOR_SEEK_MAP
+            | FragmentedMp4Extractor.FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES
+            | FragmentedMp4Extractor.FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES_H265;
     if (subtitlesParsedDuringExtraction) {
       subtitleParserFactory = new DefaultSubtitleParserFactory();
-      flags = 0;
     } else {
       subtitleParserFactory = SubtitleParser.Factory.UNSUPPORTED;
-      flags = FLAG_EMIT_RAW_SUBTITLE_DATA;
+      flags |= FLAG_EMIT_RAW_SUBTITLE_DATA;
     }
-    if (readWithinGopSampleDependencies) {
-      flags |= FragmentedMp4Extractor.FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES;
-      flags |= FragmentedMp4Extractor.FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES_H265;
-    }
-
     @FragmentedMp4Extractor.Flags int finalFlags = flags;
     return () ->
         new FragmentedMp4Extractor(

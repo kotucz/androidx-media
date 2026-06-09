@@ -16,7 +16,6 @@
 
 package androidx.media3.ui.compose.state
 
-import androidx.annotation.Nullable
 import androidx.annotation.VisibleForTesting
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -26,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Size
 import androidx.media3.common.C
+import androidx.media3.common.MediaLibraryInfo
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.VideoSize
@@ -49,8 +49,11 @@ fun rememberPresentationState(
   player: Player?,
   keepContentOnReset: Boolean = false,
 ): PresentationState {
-  val presentationState = remember { PresentationState(keepContentOnReset) }
+  val presentationState = remember {
+    PresentationState(keepContentOnReset).apply { this.player = player }
+  }
   LaunchedEffect(player) { presentationState.observe(player) }
+  LaunchedEffect(keepContentOnReset) { presentationState.keepContentOnReset = keepContentOnReset }
   return presentationState
 }
 
@@ -61,7 +64,7 @@ fun rememberPresentationState(
  * @param[keepContentOnReset] whether the currently displayed video frame or media artwork is kept
  *   visible when tracks change or player changes. Defaults to false.
  * @property[videoSizeDp] wraps [Player.getVideoSize] in Compose's [Size], becomes `null` when
- *   either height or width of the video is zero. Takes into account
+ *   either height or width of the video is zero, or [player] is null. Takes into account
  *   [VideoSize.pixelWidthHeightRatio] to return a Size in [Dp][androidx.compose.ui.unit.Dp], i.e.
  *   device-independent pixel. To use this measurement in Compose's Drawing and Layout stages,
  *   convert it into pixels using [Density.toPx][androidx.compose.ui.unit.Density.toPx]. Note that
@@ -87,7 +90,16 @@ class PresentationState(keepContentOnReset: Boolean = false) {
       }
     }
 
-  @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE) var player: Player? = null
+  @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+  var player: Player? = null
+    set(value) {
+      field = value
+      // Only update the size if we are attaching a player OR if we don't need to keep the content
+      if (value != null || !keepContentOnReset) {
+        videoSizeDp = getVideoSizeDp(value)
+      }
+      maybeHideSurface(value)
+    }
 
   private var lastPeriodUidWithTracks: Any? = null
 
@@ -100,8 +112,6 @@ class PresentationState(keepContentOnReset: Boolean = false) {
   suspend fun observe(player: Player?) {
     try {
       this@PresentationState.player = player
-      videoSizeDp = getVideoSizeDp(player)
-      maybeHideSurface(player)
       player?.listen { events ->
         if (events.contains(Player.EVENT_VIDEO_SIZE_CHANGED)) {
           if (videoSize != VideoSize.UNKNOWN && playbackState != Player.STATE_IDLE) {
@@ -123,7 +133,6 @@ class PresentationState(keepContentOnReset: Boolean = false) {
     }
   }
 
-  @Nullable
   private fun getVideoSizeDp(player: Player?): Size? {
     player ?: return null
     var videoSize = Size(player.videoSize.width.toFloat(), player.videoSize.height.toFloat())
@@ -189,4 +198,10 @@ class PresentationState(keepContentOnReset: Boolean = false) {
   private fun hasSelectedVideoTrack(player: Player): Boolean =
     player.isCommandAvailable(Player.COMMAND_GET_TRACKS) &&
       player.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)
+
+  companion object {
+    init {
+      MediaLibraryInfo.registerModule("media3.ui.compose")
+    }
+  }
 }

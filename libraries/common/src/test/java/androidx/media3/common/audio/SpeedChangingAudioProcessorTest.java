@@ -17,6 +17,7 @@ package androidx.media3.common.audio;
 
 import static androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER;
 import static androidx.media3.common.audio.SpeedChangingAudioProcessor.getInputFrameCountForOutput;
+import static androidx.media3.test.utils.TestUtil.createByteArray;
 import static androidx.media3.test.utils.TestUtil.getNonRandomByteBuffer;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertThrows;
@@ -24,8 +25,10 @@ import static org.junit.Assert.assertThrows;
 import android.annotation.SuppressLint;
 import androidx.media3.common.C;
 import androidx.media3.common.audio.AudioProcessor.AudioFormat;
+import androidx.media3.common.audio.AudioProcessor.StreamMetadata;
 import androidx.media3.test.utils.TestSpeedProvider;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
+import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
@@ -43,6 +46,18 @@ public class SpeedChangingAudioProcessorTest {
   private static final AudioFormat AUDIO_FORMAT_50_000HZ =
       new AudioFormat(
           /* sampleRate= */ 50_000, /* channelCount= */ 2, /* encoding= */ C.ENCODING_PCM_16BIT);
+  private static final SpeedProvider SPEED_PROVIDER_2X =
+      new SpeedProvider() {
+        @Override
+        public float getSpeed(long timeUs) {
+          return 2f;
+        }
+
+        @Override
+        public long getNextSpeedChangeTimeUs(long timeUs) {
+          return C.TIME_UNSET;
+        }
+      };
 
   @Test
   public void queueInput_noSpeedChange_doesNotOverwriteInput() throws Exception {
@@ -441,7 +456,7 @@ public class SpeedChangingAudioProcessorTest {
         /* inputTimeUs= */ 160L, outputTimesUs::add);
 
     assertThat(outputTimesUs).isEmpty();
-    speedChangingAudioProcessor.flush();
+    speedChangingAudioProcessor.flush(StreamMetadata.DEFAULT);
     assertThat(outputTimesUs).containsExactly(20L, 40L, 100L);
   }
 
@@ -458,7 +473,7 @@ public class SpeedChangingAudioProcessorTest {
     SpeedChangingAudioProcessor speedChangingAudioProcessor =
         new SpeedChangingAudioProcessor(speedProvider);
     speedChangingAudioProcessor.configure(AUDIO_FORMAT_50_000HZ);
-    speedChangingAudioProcessor.flush();
+    speedChangingAudioProcessor.flush(StreamMetadata.DEFAULT);
 
     speedChangingAudioProcessor.getSpeedAdjustedTimeAsync(
         /* inputTimeUs= */ 40L, outputTimesUs::add);
@@ -483,7 +498,7 @@ public class SpeedChangingAudioProcessorTest {
     SpeedChangingAudioProcessor speedChangingAudioProcessor =
         new SpeedChangingAudioProcessor(speedProvider);
     speedChangingAudioProcessor.configure(AUDIO_FORMAT_50_000HZ);
-    speedChangingAudioProcessor.flush();
+    speedChangingAudioProcessor.flush(StreamMetadata.DEFAULT);
 
     speedChangingAudioProcessor.getSpeedAdjustedTimeAsync(
         /* inputTimeUs= */ 300L, outputTimesUs::add);
@@ -502,7 +517,7 @@ public class SpeedChangingAudioProcessorTest {
     SpeedChangingAudioProcessor speedChangingAudioProcessor =
         new SpeedChangingAudioProcessor(speedProvider);
     speedChangingAudioProcessor.configure(AUDIO_FORMAT_50_000HZ);
-    speedChangingAudioProcessor.flush();
+    speedChangingAudioProcessor.flush(StreamMetadata.DEFAULT);
 
     // input (in ms) (0, 10, 20, 30, 40) ->
     // output (in ms) (0, 10/2, 10/2 + 10, 10/2 + 10 + 10/5, 10/2 + 10 + 10/5 + 10/2)
@@ -607,7 +622,7 @@ public class SpeedChangingAudioProcessorTest {
       outputFrameCount +=
           speedChangingAudioProcessor.getOutput().remaining() / AUDIO_FORMAT_44_100HZ.bytesPerFrame;
     }
-    speedChangingAudioProcessor.flush();
+    speedChangingAudioProcessor.flush(StreamMetadata.DEFAULT);
     outputFrameCount +=
         speedChangingAudioProcessor.getOutput().remaining() / AUDIO_FORMAT_44_100HZ.bytesPerFrame;
     assertThat(outputFrameCount).isEqualTo(1250);
@@ -646,7 +661,7 @@ public class SpeedChangingAudioProcessorTest {
       outputFrameCount +=
           speedChangingAudioProcessor.getOutput().remaining() / AUDIO_FORMAT_44_100HZ.bytesPerFrame;
     }
-    speedChangingAudioProcessor.flush();
+    speedChangingAudioProcessor.flush(StreamMetadata.DEFAULT);
     outputFrameCount +=
         speedChangingAudioProcessor.getOutput().remaining() / AUDIO_FORMAT_44_100HZ.bytesPerFrame;
     assertThat(outputFrameCount).isWithin(1).of(625);
@@ -664,6 +679,99 @@ public class SpeedChangingAudioProcessorTest {
     outputFrameCount +=
         speedChangingAudioProcessor.getOutput().remaining() / AUDIO_FORMAT_44_100HZ.bytesPerFrame;
     assertThat(outputFrameCount).isWithin(2).of(1250); // 625 * 2.
+  }
+
+  @Test
+  public void flush_withNonZeroPositionOffset_appliesCorrectSpeedRegion() throws Exception {
+    SpeedProvider speedProvider =
+        TestSpeedProvider.createWithFrameCounts(
+            AUDIO_FORMAT_44_100HZ,
+            /* frameCounts= */ new int[] {4410, 4410},
+            /* speeds= */ new float[] {2, 10});
+    SpeedChangingAudioProcessor speedChangingAudioProcessor =
+        getConfiguredSpeedChangingAudioProcessor(speedProvider);
+    ByteBuffer input = getNonRandomByteBuffer(4410, AUDIO_FORMAT_44_100HZ.bytesPerFrame);
+
+    // Flush to start of second speed region.
+    speedChangingAudioProcessor.flush(
+        new StreamMetadata.Builder().setPositionOffsetUs(100_000L).build());
+    int outputFrameCount = 0;
+    while (input.hasRemaining()) {
+      speedChangingAudioProcessor.queueInput(input);
+      outputFrameCount +=
+          speedChangingAudioProcessor.getOutput().remaining() / AUDIO_FORMAT_44_100HZ.bytesPerFrame;
+    }
+    speedChangingAudioProcessor.queueEndOfStream();
+    outputFrameCount +=
+        speedChangingAudioProcessor.getOutput().remaining() / AUDIO_FORMAT_44_100HZ.bytesPerFrame;
+
+    assertThat(outputFrameCount).isEqualTo(441); // 4410 frames / 10x speed.
+  }
+
+  @Test
+  public void flush_withNonZeroPositionOffsetAndAdjustedInputTimestamps_appliesCorrectSpeedRegion()
+      throws Exception {
+    SpeedProvider speedProvider =
+        TestSpeedProvider.createWithFrameCounts(
+            AUDIO_FORMAT_44_100HZ,
+            /* frameCounts= */ new int[] {4410, 4410},
+            /* speeds= */ new float[] {2, 10});
+    SpeedChangingAudioProcessor speedChangingAudioProcessor =
+        new SpeedChangingAudioProcessor(
+            speedProvider,
+            /* areInputTimestampsAdjusted= */ true,
+            /* shouldMaintainPitch= */ false);
+    speedChangingAudioProcessor.configure(AUDIO_FORMAT_44_100HZ);
+    // 50_000us is the start of the 10x speed region.
+    speedChangingAudioProcessor.flush(
+        new StreamMetadata.Builder().setPositionOffsetUs(50_000).build());
+    ByteBuffer input =
+        getNonRandomByteBuffer(/* frameCount= */ 4410, AUDIO_FORMAT_44_100HZ.bytesPerFrame);
+
+    int outputFrameCount = 0;
+    while (input.hasRemaining()) {
+      speedChangingAudioProcessor.queueInput(input);
+      outputFrameCount +=
+          speedChangingAudioProcessor.getOutput().remaining() / AUDIO_FORMAT_44_100HZ.bytesPerFrame;
+    }
+    speedChangingAudioProcessor.queueEndOfStream();
+    outputFrameCount +=
+        speedChangingAudioProcessor.getOutput().remaining() / AUDIO_FORMAT_44_100HZ.bytesPerFrame;
+
+    assertThat(outputFrameCount).isEqualTo(441); // 4410 frames / 10x speed.
+  }
+
+  @Test
+  public void flush_withDefaultStreamMetadataAndAdjustedInputTimestamps_appliesCorrectSpeedRegion()
+      throws Exception {
+    SpeedProvider speedProvider =
+        TestSpeedProvider.createWithFrameCounts(
+            AUDIO_FORMAT_44_100HZ,
+            /* frameCounts= */ new int[] {4410, 4410},
+            /* speeds= */ new float[] {2, 10});
+    SpeedChangingAudioProcessor speedChangingAudioProcessor =
+        new SpeedChangingAudioProcessor(
+            speedProvider,
+            /* areInputTimestampsAdjusted= */ true,
+            /* shouldMaintainPitch= */ false);
+    speedChangingAudioProcessor.configure(AUDIO_FORMAT_44_100HZ);
+    speedChangingAudioProcessor.flush(StreamMetadata.DEFAULT);
+    ByteBuffer input =
+        getNonRandomByteBuffer(/* frameCount= */ 8820, AUDIO_FORMAT_44_100HZ.bytesPerFrame);
+
+    int outputFrameCount = 0;
+    while (input.hasRemaining()) {
+      speedChangingAudioProcessor.queueInput(input);
+      outputFrameCount +=
+          speedChangingAudioProcessor.getOutput().remaining() / AUDIO_FORMAT_44_100HZ.bytesPerFrame;
+    }
+    speedChangingAudioProcessor.queueEndOfStream();
+    outputFrameCount +=
+        speedChangingAudioProcessor.getOutput().remaining() / AUDIO_FORMAT_44_100HZ.bytesPerFrame;
+
+    // 4410 frames / 2x speed + 4410 frames / 10x speed = 2205 + 441 = 2646.
+    // One sample of tolerance per speed change.
+    assertThat(outputFrameCount).isWithin(1).of(2646);
   }
 
   @Test
@@ -820,13 +928,98 @@ public class SpeedChangingAudioProcessorTest {
     assertThat(inputFrames).isEqualTo(0L);
   }
 
+  @Test
+  public void
+      getDurationAfterProcessorApplied_withOriginalInputTimestamps_returnsAdjustedDuration() {
+    SpeedChangingAudioProcessor processor =
+        new SpeedChangingAudioProcessor(
+            SPEED_PROVIDER_2X,
+            /* areInputTimestampsAdjusted= */ false,
+            /* shouldMaintainPitch= */ false);
+    assertThat(processor.getDurationAfterProcessorApplied(1_000_000)).isEqualTo(500_000);
+  }
+
+  @Test
+  public void
+      getDurationAfterProcessorApplied_withAdjustedInputTimestamps_returnsUnadjustedDuration() {
+    SpeedChangingAudioProcessor processor =
+        new SpeedChangingAudioProcessor(
+            SPEED_PROVIDER_2X,
+            /* areInputTimestampsAdjusted= */ true,
+            /* shouldMaintainPitch= */ false);
+    assertThat(processor.getDurationAfterProcessorApplied(1_000_000)).isEqualTo(1_000_000);
+  }
+
+  @Test
+  public void maintainPitch_outputMatchesStandaloneSonic() throws Exception {
+    ByteArrayOutputStream speedChangingAudioProcessorOutput = new ByteArrayOutputStream();
+    SpeedChangingAudioProcessor processor =
+        new SpeedChangingAudioProcessor(
+            SPEED_PROVIDER_2X,
+            /* areInputTimestampsAdjusted= */ false,
+            /* shouldMaintainPitch= */ true);
+    processor.configure(AUDIO_FORMAT_44_100HZ);
+    processor.flush(StreamMetadata.DEFAULT);
+
+    ByteBuffer input = getNonRandomByteBuffer(4096, AUDIO_FORMAT_44_100HZ.bytesPerFrame);
+    processor.queueInput(input);
+    assertThat(input.hasRemaining()).isFalse();
+    drainAudioProcessorIntoStream(processor, speedChangingAudioProcessorOutput);
+    processor.queueEndOfStream();
+    while (!processor.isEnded()) {
+      drainAudioProcessorIntoStream(processor, speedChangingAudioProcessorOutput);
+    }
+
+    input.rewind();
+    ByteBuffer expectedOutput =
+        processInputWithSonic(AUDIO_FORMAT_44_100HZ, /* speed= */ 2f, /* pitch= */ 1f, input);
+
+    assertThat(speedChangingAudioProcessorOutput.toByteArray())
+        .isEqualTo(createByteArray(expectedOutput));
+  }
+
+  /**
+   * Processes the given input with {@link Sonic} and returns the output as a {@link ByteBuffer}.
+   *
+   * @param format The {@link AudioFormat} to use as input and output.
+   * @param speed The speed factor to apply.
+   * @param pitch The pitch factor to apply.
+   * @param input The input samples to process.
+   */
+  private static ByteBuffer processInputWithSonic(
+      AudioFormat format, float speed, float pitch, ByteBuffer input) {
+    Sonic sonic =
+        new Sonic(
+            /* inputSampleRateHz= */ format.sampleRate,
+            format.channelCount,
+            speed,
+            pitch,
+            /* outputSampleRateHz= */ format.sampleRate,
+            /* useFloatSamples= */ false);
+    sonic.queueInput(input);
+    assertThat(input.hasRemaining()).isFalse();
+    sonic.queueEndOfStream();
+    ByteBuffer output =
+        ByteBuffer.allocateDirect(sonic.getOutputSize()).order(ByteOrder.nativeOrder());
+    sonic.getOutput(output);
+    output.flip();
+    return output;
+  }
+
   private static SpeedChangingAudioProcessor getConfiguredSpeedChangingAudioProcessor(
       SpeedProvider speedProvider) throws AudioProcessor.UnhandledAudioFormatException {
     SpeedChangingAudioProcessor speedChangingAudioProcessor =
         new SpeedChangingAudioProcessor(speedProvider);
     speedChangingAudioProcessor.configure(AUDIO_FORMAT_44_100HZ);
-    speedChangingAudioProcessor.flush();
+    speedChangingAudioProcessor.flush(StreamMetadata.DEFAULT);
     return speedChangingAudioProcessor;
+  }
+
+  private static void drainAudioProcessorIntoStream(
+      AudioProcessor audioProcessor, ByteArrayOutputStream stream) {
+    ByteBuffer output = audioProcessor.getOutput();
+    byte[] bufferBytes = createByteArray(output);
+    stream.write(bufferBytes, /* off= */ 0, bufferBytes.length);
   }
 
   private static ByteBuffer getAudioProcessorOutput(AudioProcessor audioProcessor) {

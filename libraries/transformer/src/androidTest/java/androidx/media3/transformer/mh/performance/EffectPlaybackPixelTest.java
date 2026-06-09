@@ -17,15 +17,14 @@
 package androidx.media3.transformer.mh.performance;
 
 import static androidx.media3.common.Player.STATE_ENDED;
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
+import static androidx.media3.test.utils.AssetInfo.MP4_ADVANCED_ASSET;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.MAXIMUM_AVERAGE_PIXEL_ABSOLUTE_DIFFERENCE;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.createArgb8888BitmapFromRgba8888Image;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.createArgb8888BitmapFromRgba8888ImageBuffer;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.getBitmapAveragePixelAbsoluteDifferenceArgb8888;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.readBitmap;
-import static androidx.media3.transformer.AndroidTestUtil.MP4_ASSET;
 import static androidx.media3.transformer.mh.performance.PlaybackTestUtil.createTimestampOverlay;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static org.junit.Assume.assumeTrue;
@@ -58,6 +57,7 @@ import androidx.media3.exoplayer.util.EventLogger;
 import androidx.media3.exoplayer.video.MediaCodecVideoRenderer;
 import androidx.media3.exoplayer.video.VideoRendererEventListener;
 import androidx.media3.test.utils.BitmapPixelTestUtil;
+import androidx.media3.transformer.AndroidTestUtil.NoFrameDroppingVideoRenderer;
 import androidx.media3.transformer.AndroidTestUtil.ReplayVideoRenderer;
 import androidx.media3.transformer.SurfaceTestActivity;
 import androidx.test.core.app.ApplicationProvider;
@@ -72,6 +72,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
@@ -81,6 +82,7 @@ import org.junit.runner.RunWith;
 // These tests are in the performance package even though they are not performance tests so that
 // they are not run on all devices. This is because they use ImageReader, which has a tendency to
 // drop frames.
+@Ignore("Only intended to run on internal infra: b/396671260")
 @RunWith(AndroidJUnit4.class)
 public class EffectPlaybackPixelTest {
 
@@ -107,8 +109,8 @@ public class EffectPlaybackPixelTest {
     // VideoFrameProcessor. Using maxImages=10 runs successfully on a Pixel3.
     outputImageReader =
         ImageReader.newInstance(
-            MP4_ASSET.videoFormat.width,
-            MP4_ASSET.videoFormat.height,
+            MP4_ADVANCED_ASSET.videoFormat.width,
+            MP4_ADVANCED_ASSET.videoFormat.height,
             PixelFormat.RGBA_8888,
             // Use a larger count to avoid ImageReader dropping frames
             /* maxImages= */ 10);
@@ -128,7 +130,7 @@ public class EffectPlaybackPixelTest {
     instrumentation.runOnMainSync(
         () -> {
           player = new ExoPlayer.Builder(ApplicationProvider.getApplicationContext()).build();
-          checkStateNotNull(outputImageReader);
+          checkNotNull(outputImageReader);
           outputImageReader.setOnImageAvailableListener(
               imageReader -> {
                 try (Image image = imageReader.acquireLatestImage()) {
@@ -142,14 +144,15 @@ public class EffectPlaybackPixelTest {
               player,
               checkNotNull(findVideoRenderer(player)),
               outputImageReader.getSurface(),
-              new Size(MP4_ASSET.videoFormat.width, MP4_ASSET.videoFormat.height));
+              new Size(
+                  MP4_ADVANCED_ASSET.videoFormat.width, MP4_ADVANCED_ASSET.videoFormat.height));
 
           player.setPlayWhenReady(false);
           player.setVideoEffects(ImmutableList.of(createTimestampOverlay()));
 
           // Adding an EventLogger to use its log output in case the test fails.
           player.addAnalyticsListener(new EventLogger());
-          player.setMediaItem(MediaItem.fromUri(MP4_ASSET.uri));
+          player.setMediaItem(MediaItem.fromUri(MP4_ADVANCED_ASSET.uri));
           player.prepare();
         });
 
@@ -172,7 +175,7 @@ public class EffectPlaybackPixelTest {
   public void exoplayerEffectsPreviewTest_ensuresAllFramesRendered() throws Exception {
     // Internal reference: b/264252759.
     assumeTrue(
-        "This test should run on real devices because OpenGL to ImageReader rendering is"
+        "This test should run on real devices because OpenGL to ImageReader rendering is "
             + "not always reliable on emulators.",
         !Util.isRunningOnEmulator());
 
@@ -184,8 +187,7 @@ public class EffectPlaybackPixelTest {
     instrumentation.runOnMainSync(
         () -> {
           Context context = ApplicationProvider.getApplicationContext();
-          Renderer videoRenderer =
-              new NoFrameDroppedVideoRenderer(context, MediaCodecSelector.DEFAULT);
+          Renderer videoRenderer = new NoFrameDroppingVideoRenderer(context);
           player =
               new ExoPlayer.Builder(context)
                   .setRenderersFactory(
@@ -205,13 +207,13 @@ public class EffectPlaybackPixelTest {
                       })
                   .build();
 
-          checkStateNotNull(outputImageReader);
+          checkNotNull(outputImageReader);
           outputImageReader.setOnImageAvailableListener(
               imageReader -> {
                 try (Image image = imageReader.acquireNextImage()) {
                   readImageBuffers.add(BitmapPixelTestUtil.copyByteBufferFromRbga8888Image(image));
                 }
-                if (renderedFramesCount.incrementAndGet() == MP4_ASSET.videoFrameCount) {
+                if (renderedFramesCount.incrementAndGet() == MP4_ADVANCED_ASSET.videoFrameCount) {
                   readAllOutputFrames.open();
                 }
               },
@@ -221,7 +223,8 @@ public class EffectPlaybackPixelTest {
               player,
               videoRenderer,
               outputImageReader.getSurface(),
-              new Size(MP4_ASSET.videoFormat.width, MP4_ASSET.videoFormat.height));
+              new Size(
+                  MP4_ADVANCED_ASSET.videoFormat.width, MP4_ADVANCED_ASSET.videoFormat.height));
           player.setPlayWhenReady(true);
           player.setVideoEffects(ImmutableList.of(createTimestampOverlay()));
 
@@ -236,7 +239,7 @@ public class EffectPlaybackPixelTest {
                   }
                 }
               });
-          player.setMediaItem(MediaItem.fromUri(MP4_ASSET.uri));
+          player.setMediaItem(MediaItem.fromUri(MP4_ADVANCED_ASSET.uri));
           player.prepare();
         });
 
@@ -279,7 +282,7 @@ public class EffectPlaybackPixelTest {
       throws Exception {
     // Internal reference: b/264252759.
     assumeTrue(
-        "This test should run on real devices because OpenGL to ImageReader rendering is"
+        "This test should run on real devices because OpenGL to ImageReader rendering is "
             + "not always reliable on emulators.",
         !Util.isRunningOnEmulator());
 
@@ -313,7 +316,7 @@ public class EffectPlaybackPixelTest {
                       })
                   .build();
 
-          checkStateNotNull(outputImageReader);
+          checkNotNull(outputImageReader);
           outputImageReader.setOnImageAvailableListener(
               imageReader -> {
                 try (Image image = imageReader.acquireNextImage()) {
@@ -332,7 +335,8 @@ public class EffectPlaybackPixelTest {
               player,
               videoRenderer,
               outputImageReader.getSurface(),
-              new Size(MP4_ASSET.videoFormat.width, MP4_ASSET.videoFormat.height));
+              new Size(
+                  MP4_ADVANCED_ASSET.videoFormat.width, MP4_ADVANCED_ASSET.videoFormat.height));
           player.setPlayWhenReady(false);
           AdjustableContrast contrast = new AdjustableContrast();
           player.setVideoEffects(ImmutableList.of(createTimestampOverlay(), contrast));
@@ -374,7 +378,7 @@ public class EffectPlaybackPixelTest {
                 }
                 firstFrameRenderedCount.getAndIncrement();
               });
-          player.setMediaItem(MediaItem.fromUri(MP4_ASSET.uri));
+          player.setMediaItem(MediaItem.fromUri(MP4_ADVANCED_ASSET.uri));
           player.prepare();
         });
 
@@ -419,7 +423,7 @@ public class EffectPlaybackPixelTest {
       throws Exception {
     // Internal reference: b/264252759.
     assumeTrue(
-        "This test should run on real devices because OpenGL to ImageReader rendering is"
+        "This test should run on real devices because OpenGL to ImageReader rendering is "
             + "not always reliable on emulators.",
         !Util.isRunningOnEmulator());
 
@@ -431,16 +435,15 @@ public class EffectPlaybackPixelTest {
     // VideoFrameProcessor. Using maxImages=10 runs successfully on a Pixel3.
     outputImageReader =
         ImageReader.newInstance(
-            MP4_ASSET.videoFormat.width,
-            MP4_ASSET.videoFormat.height,
+            MP4_ADVANCED_ASSET.videoFormat.width,
+            MP4_ADVANCED_ASSET.videoFormat.height,
             PixelFormat.RGBA_8888,
             /* maxImages= */ 10);
 
     instrumentation.runOnMainSync(
         () -> {
           Context context = ApplicationProvider.getApplicationContext();
-          Renderer videoRenderer =
-              new NoFrameDroppedVideoRenderer(context, MediaCodecSelector.DEFAULT);
+          Renderer videoRenderer = new NoFrameDroppingVideoRenderer(context);
           player =
               new ExoPlayer.Builder(context)
                   .setRenderersFactory(
@@ -460,13 +463,13 @@ public class EffectPlaybackPixelTest {
                       })
                   .build();
 
-          checkStateNotNull(outputImageReader);
+          checkNotNull(outputImageReader);
           outputImageReader.setOnImageAvailableListener(
               imageReader -> {
                 try (Image image = imageReader.acquireNextImage()) {
                   readImageBuffers.add(BitmapPixelTestUtil.copyByteBufferFromRbga8888Image(image));
                 }
-                if (renderedFramesCount.incrementAndGet() == MP4_ASSET.videoFrameCount) {
+                if (renderedFramesCount.incrementAndGet() == MP4_ADVANCED_ASSET.videoFrameCount) {
                   readAllOutputFrames.open();
                 }
               },
@@ -476,7 +479,8 @@ public class EffectPlaybackPixelTest {
               player,
               videoRenderer,
               outputImageReader.getSurface(),
-              new Size(MP4_ASSET.videoFormat.width, MP4_ASSET.videoFormat.height));
+              new Size(
+                  MP4_ADVANCED_ASSET.videoFormat.width, MP4_ADVANCED_ASSET.videoFormat.height));
           player.setPlayWhenReady(true);
           player.setVideoEffects(
               ImmutableList.of(
@@ -494,7 +498,7 @@ public class EffectPlaybackPixelTest {
                   }
                 }
               });
-          player.setMediaItem(MediaItem.fromUri(MP4_ASSET.uri));
+          player.setMediaItem(MediaItem.fromUri(MP4_ADVANCED_ASSET.uri));
           player.prepare();
         });
 
@@ -568,25 +572,6 @@ public class EffectPlaybackPixelTest {
     }
     if (imageReader != null) {
       imageReader.close();
-    }
-  }
-
-  private static class NoFrameDroppedVideoRenderer extends MediaCodecVideoRenderer {
-
-    public NoFrameDroppedVideoRenderer(Context context, MediaCodecSelector mediaCodecSelector) {
-      super(new Builder(context).setMediaCodecSelector(mediaCodecSelector));
-    }
-
-    @Override
-    protected boolean shouldDropOutputBuffer(
-        long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-      return false;
-    }
-
-    @Override
-    protected boolean shouldDropBuffersToKeyframe(
-        long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-      return false;
     }
   }
 

@@ -40,9 +40,11 @@ import static org.junit.Assert.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.robolectric.annotation.Config.NEWEST_SDK;
 
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
+import android.media.AudioFormat;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -50,13 +52,14 @@ import android.os.Looper;
 import android.util.SparseArray;
 import android.util.SparseLongArray;
 import androidx.media3.common.C;
+import androidx.media3.common.Format;
 import androidx.media3.test.utils.TestUtil;
-import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.common.io.ByteStreams;
 import com.google.common.primitives.Bytes;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
+import com.google.testing.junit.testparameterinjector.TestParameter;
 import java.io.ByteArrayInputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -72,11 +75,12 @@ import java.util.zip.Deflater;
 import java.util.zip.GZIPInputStream;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestParameterInjector;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowLooper;
 
 /** Unit tests for {@link Util}. */
-@RunWith(AndroidJUnit4.class)
+@RunWith(RobolectricTestParameterInjector.class)
 public class UtilTest {
 
   private static final int TIMEOUT_MS = 10000;
@@ -159,6 +163,8 @@ public class UtilTest {
   @Test
   public void percentInt_smallNegativeValues() {
     assertThat(Util.percentInt(-3, -9)).isEqualTo(33);
+    assertThat(Util.percentInt(-3, 9)).isEqualTo(-33);
+    assertThat(Util.percentInt(3, -9)).isEqualTo(-33);
     assertThat(Util.percentInt(-3, -3)).isEqualTo(100);
   }
 
@@ -170,6 +176,16 @@ public class UtilTest {
   @Test
   public void percentInt_largeNegativeValuesDontOverflow() {
     assertThat(Util.percentInt(Long.MIN_VALUE / 4, Long.MIN_VALUE / 2)).isEqualTo(50);
+  }
+
+  @Test
+  public void percentInt_resultLargerThan100() {
+    assertThat(Util.percentInt(20, 5)).isEqualTo(400);
+  }
+
+  @Test
+  public void percentInt_resultOverflowsInt_saturatedCast() {
+    assertThat(Util.percentInt(Integer.MAX_VALUE * 3L, 2)).isEqualTo(Integer.MAX_VALUE);
   }
 
   @Test
@@ -922,6 +938,7 @@ public class UtilTest {
   }
 
   @Test
+  @Config(sdk = NEWEST_SDK) // Too slow to run on all SDKs.
   public void sampleCountToDuration_thenDurationToSampleCount_returnsOriginalValue() {
     // Use co-prime increments, to maximise 'discord' between sampleCount and sampleRate.
     for (long originalSampleCount = 0; originalSampleCount < 100_000; originalSampleCount += 97) {
@@ -963,14 +980,25 @@ public class UtilTest {
   }
 
   @Test
-  public void parseXsDateTime_returnsParsedDateTimeInMillis() throws Exception {
-    assertThat(parseXsDateTime("2014-06-19T23:07:42")).isEqualTo(1403219262000L);
-    assertThat(parseXsDateTime("2014-08-06T11:00:00Z")).isEqualTo(1407322800000L);
-    assertThat(parseXsDateTime("2014-08-06T11:00:00,000Z")).isEqualTo(1407322800000L);
-    assertThat(parseXsDateTime("2014-09-19T13:18:55-08:00")).isEqualTo(1411161535000L);
-    assertThat(parseXsDateTime("2014-09-19T13:18:55-0800")).isEqualTo(1411161535000L);
-    assertThat(parseXsDateTime("2014-09-19T13:18:55.000-0800")).isEqualTo(1411161535000L);
-    assertThat(parseXsDateTime("2014-09-19T13:18:55.000-800")).isEqualTo(1411161535000L);
+  public void parseXsDateTime_returnsParsedDateTimeInMillis(
+      @TestParameter({"T", "t", " "}) String separator) throws Exception {
+    assertThat(parseXsDateTime("2014-06-19" + separator + "23:07:42")).isEqualTo(1403219262000L);
+    assertThat(parseXsDateTime("2014-08-06" + separator + "11:00:00Z")).isEqualTo(1407322800000L);
+    assertThat(parseXsDateTime("2014-08-06" + separator + "11:00:00,000Z"))
+        .isEqualTo(1407322800000L);
+    assertThat(parseXsDateTime("2014-09-19" + separator + "13:18:55-08:00"))
+        .isEqualTo(1411161535000L);
+    assertThat(parseXsDateTime("2014-09-19" + separator + "13:18:55+0100"))
+        .isEqualTo(1411129135000L);
+    assertThat(parseXsDateTime("2014-09-19" + separator + "13:18:55.000-0800"))
+        .isEqualTo(1411161535000L);
+    assertThat(parseXsDateTime("2014-09-19" + separator + "13:18:55.000-800"))
+        .isEqualTo(1411161535000L);
+    assertThat(parseXsDateTime("2014-09-19" + separator + "13:18:55-08")).isEqualTo(1411161535000L);
+    assertThat(parseXsDateTime("2014-09-19" + separator + "13:18:55.000-8"))
+        .isEqualTo(1411161535000L);
+    assertThat(parseXsDateTime("2014-09-19" + separator + "13:18:55+01")).isEqualTo(1411129135000L);
+    assertThat(parseXsDateTime("2014-09-19" + separator + "13:18:55+1")).isEqualTo(1411129135000L);
   }
 
   @Test
@@ -1014,6 +1042,21 @@ public class UtilTest {
   @Test
   public void toLong_withBigNegativeValue_returnsValue() {
     assertThat(Util.toLong(0xFEDCBA, 0x87654321)).isEqualTo(0xFEDCBA_87654321L);
+  }
+
+  @Test
+  public void getBytesFromHexString_caseInsensitive() {
+    assertThat(Util.getBytesFromHexString("12fC06")).isEqualTo(createByteArray(0x12, 0xFC, 0x06));
+  }
+
+  @Test
+  public void getBytesFromHexString_invalidCharacters_throws() {
+    assertThrows(IllegalArgumentException.class, () -> Util.getBytesFromHexString("FOOBAR"));
+  }
+
+  @Test
+  public void getBytesFromHexString_oddLength_throws() {
+    assertThrows(IllegalArgumentException.class, () -> Util.getBytesFromHexString("12F"));
   }
 
   @Test
@@ -1175,7 +1218,6 @@ public class UtilTest {
   }
 
   @Test
-  @Config(sdk = Config.ALL_SDKS)
   public void normalizeLanguageCode_keepsUndefinedTagsUnchanged() {
     assertThat(Util.normalizeLanguageCode(null)).isNull();
     assertThat(Util.normalizeLanguageCode("")).isEmpty();
@@ -1184,7 +1226,6 @@ public class UtilTest {
   }
 
   @Test
-  @Config(sdk = Config.ALL_SDKS)
   public void normalizeLanguageCode_normalizesCodeToTwoLetterISOAndLowerCase_keepingAllSubtags() {
     assertThat(Util.normalizeLanguageCode("es")).isEqualTo("es");
     assertThat(Util.normalizeLanguageCode("spa")).isEqualTo("es");
@@ -1203,7 +1244,6 @@ public class UtilTest {
   }
 
   @Test
-  @Config(sdk = Config.ALL_SDKS)
   public void normalizeLanguageCode_iso6392BibliographicalAndTextualCodes_areNormalizedToSameTag() {
     // See https://en.wikipedia.org/wiki/List_of_ISO_639-2_codes.
     assertThat(Util.normalizeLanguageCode("alb")).isEqualTo(Util.normalizeLanguageCode("sqi"));
@@ -1230,7 +1270,6 @@ public class UtilTest {
   }
 
   @Test
-  @Config(sdk = Config.ALL_SDKS)
   public void
       normalizeLanguageCode_deprecatedLanguageTagsAndModernReplacement_areNormalizedToSameTag() {
     // See https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes, "ISO 639:1988"
@@ -1268,7 +1307,6 @@ public class UtilTest {
   }
 
   @Test
-  @Config(sdk = Config.ALL_SDKS)
   public void normalizeLanguageCode_macrolanguageTags_areFullyMaintained() {
     // See https://en.wikipedia.org/wiki/ISO_639_macrolanguage
     assertThat(Util.normalizeLanguageCode("zh-cmn")).isEqualTo("zh-cmn");
@@ -1314,9 +1352,35 @@ public class UtilTest {
   }
 
   @Test
-  public void getStringForTime_withNegativeTime_setsNegativePrefix() {
-    assertThat(getStringForTime(new StringBuilder(), new Formatter(), /* timeMs= */ -35000))
-        .isEqualTo("-00:35");
+  public void getStringForTime_withRangeOfValues() {
+    assertThat(getStringForTime(C.TIME_UNSET)).isEqualTo("00:00");
+    assertThat(getStringForTime(0)).isEqualTo("00:00");
+    assertThat(getStringForTime(413)).isEqualTo("00:00");
+    assertThat(getStringForTime(800)).isEqualTo("00:01");
+    assertThat(getStringForTime(10_000)).isEqualTo("00:10");
+    assertThat(getStringForTime(65_000)).isEqualTo("01:05");
+    assertThat(getStringForTime(3_661_000)).isEqualTo("1:01:01");
+    assertThat(getStringForTime(-4_000)).isEqualTo("-00:04");
+  }
+
+  @Test
+  public void getStringForTime_withFormatter_withRangeOfValues() {
+    assertThat(getStringForTime(new StringBuilder(), new Formatter(), /* timeMs= */ C.TIME_UNSET))
+        .isEqualTo("00:00");
+    assertThat(getStringForTime(new StringBuilder(), new Formatter(), /* timeMs= */ 0))
+        .isEqualTo("00:00");
+    assertThat(getStringForTime(new StringBuilder(), new Formatter(), /* timeMs= */ 413))
+        .isEqualTo("00:00");
+    assertThat(getStringForTime(new StringBuilder(), new Formatter(), /* timeMs= */ 800))
+        .isEqualTo("00:01");
+    assertThat(getStringForTime(new StringBuilder(), new Formatter(), /* timeMs= */ 10_000))
+        .isEqualTo("00:10");
+    assertThat(getStringForTime(new StringBuilder(), new Formatter(), /* timeMs= */ 65_000))
+        .isEqualTo("01:05");
+    assertThat(getStringForTime(new StringBuilder(), new Formatter(), /* timeMs= */ 3_661_000))
+        .isEqualTo("1:01:01");
+    assertThat(getStringForTime(new StringBuilder(), new Formatter(), /* timeMs= */ -4_000))
+        .isEqualTo("-00:04");
   }
 
   @Test
@@ -1623,7 +1687,10 @@ public class UtilTest {
   }
 
   @Test
-  @Config(minSdk = 21) // Specifies the minimum SDK to enforce the test to run with all API levels.
+  @Config(
+      minSdk =
+          Config.OLDEST_SDK) // Specifies the minimum SDK to enforce the test to run with all API
+  // levels.
   public void contentEquals_sparseArraysWithEqualContent_returnsTrue() {
     SparseArray<Integer> sparseArray1 = new SparseArray<>();
     sparseArray1.put(1, 2);
@@ -1636,7 +1703,10 @@ public class UtilTest {
   }
 
   @Test
-  @Config(minSdk = 21) // Specifies the minimum SDK to enforce the test to run with all API levels.
+  @Config(
+      minSdk =
+          Config.OLDEST_SDK) // Specifies the minimum SDK to enforce the test to run with all API
+  // levels.
   public void contentEquals_sparseArraysWithDifferentContents_returnsFalse() {
     SparseArray<Integer> sparseArray1 = new SparseArray<>();
     sparseArray1.put(1, 2);
@@ -1652,7 +1722,10 @@ public class UtilTest {
   }
 
   @Test
-  @Config(minSdk = 21) // Specifies the minimum SDK to enforce the test to run with all API levels.
+  @Config(
+      minSdk =
+          Config.OLDEST_SDK) // Specifies the minimum SDK to enforce the test to run with all API
+  // levels.
   public void contentHashCode_sparseArraysWithEqualContent_returnsEqualContentHashCode() {
     SparseArray<Integer> sparseArray1 = new SparseArray<>();
     sparseArray1.put(1, 2);
@@ -1665,7 +1738,10 @@ public class UtilTest {
   }
 
   @Test
-  @Config(minSdk = 21) // Specifies the minimum SDK to enforce the test to run with all API levels.
+  @Config(
+      minSdk =
+          Config.OLDEST_SDK) // Specifies the minimum SDK to enforce the test to run with all API
+  // levels.
   public void contentHashCode_sparseArraysWithDifferentContent_returnsDifferentContentHashCode() {
     // In theory this is not guaranteed though, adding this test to ensure a sensible
     // contentHashCode implementation.
@@ -1729,6 +1805,24 @@ public class UtilTest {
     assertThat(getInt24(buffer, 0)).isEqualTo(-1);
     assertThat(getInt24(buffer, 3)).isEqualTo(0x00123456);
     assertThat(getInt24(buffer, 6)).isEqualTo(0xFFFF0001);
+  }
+
+  @Test
+  public void getAudioTrackChannelConfig_withChannelMask_returnsChannelMask() {
+    Format format =
+        new Format.Builder()
+            .setChannelCount(6)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_5POINT1)
+            .build();
+
+    assertThat(Util.getAudioTrackChannelConfig(format)).isEqualTo(AudioFormat.CHANNEL_OUT_5POINT1);
+  }
+
+  @Test
+  public void getAudioTrackChannelConfig_withoutChannelMask_infersFromChannelCount() {
+    Format format = new Format.Builder().setChannelCount(6).build();
+
+    assertThat(Util.getAudioTrackChannelConfig(format)).isEqualTo(AudioFormat.CHANNEL_OUT_5POINT1);
   }
 
   private static void assertEscapeUnescapeFileName(String fileName, String escapedFileName) {

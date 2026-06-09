@@ -29,6 +29,7 @@ import androidx.media3.datasource.DataSpec;
 import androidx.media3.exoplayer.trackselection.ExoTrackSelection;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.common.collect.ImmutableListMultimap;
+import com.google.common.collect.ImmutableMap;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
@@ -37,14 +38,14 @@ import org.junit.runner.RunWith;
 public class CmcdDataTest {
 
   @Test
-  public void createInstance_withInvalidFactoryState_throwsIllegalStateException() {
+  public void createInstance_withInvalidFactoryState_throwsException() {
     CmcdConfiguration cmcdConfiguration =
         CmcdConfiguration.Factory.DEFAULT.createCmcdConfiguration(MediaItem.EMPTY);
     ExoTrackSelection trackSelection = mock(ExoTrackSelection.class);
 
     assertThrows(
         "Track selection must be set",
-        IllegalStateException.class,
+        NullPointerException.class,
         () ->
             new CmcdData.Factory(cmcdConfiguration, CmcdData.STREAMING_FORMAT_DASH)
                 .setObjectType(CmcdData.OBJECT_TYPE_INIT_SEGMENT)
@@ -552,5 +553,91 @@ public class CmcdDataTest {
 
     assertThat(dataSpec.uri.getQueryParameter(CmcdConfiguration.CMCD_QUERY_PARAMETER_KEY))
         .isEmpty();
+  }
+
+  @Test
+  public void removeFromDataSpec_noCmcdData_returnsUnmodifiedDataSpec() {
+    DataSpec dataSpec =
+        new DataSpec.Builder()
+            .setUri("https://test.test/test.mp4?key=value&cMcD=test&key2=value2")
+            .setHttpRequestHeaders(ImmutableMap.of("headerKey1", "headerValue1"))
+            .build();
+
+    DataSpec updatedDataSpec = CmcdData.removeFromDataSpec(dataSpec);
+
+    assertThat(updatedDataSpec).isEqualTo(dataSpec);
+  }
+
+  @Test
+  public void removeFromDataSpec_cmcdDataQueryParameter_removesQueryParameter() {
+    DataSpec dataSpec =
+        new DataSpec.Builder()
+            .setUri(
+                "https://test.test/test.mp4?key=value&CMCD=bl%3D1800%2Cbr%3D840%2Cbs&key2=value2")
+            .setHttpRequestHeaders(ImmutableMap.of("headerKey1", "headerValue1"))
+            .build();
+
+    DataSpec updatedDataSpec = CmcdData.removeFromDataSpec(dataSpec);
+
+    assertThat(updatedDataSpec.uri.toString())
+        .isEqualTo("https://test.test/test.mp4?key=value&key2=value2");
+    assertThat(updatedDataSpec.httpRequestHeaders).containsExactly("headerKey1", "headerValue1");
+  }
+
+  @Test
+  public void removeFromDataSpec_cmcdHttpHeaders_removesHttpHeaders() {
+    DataSpec dataSpec =
+        new DataSpec.Builder()
+            .setUri("https://test.test/test.mp4")
+            .setHttpRequestHeaders(
+                ImmutableMap.of(
+                    "headerKey1",
+                    "headerValue1",
+                    "CMCD-Object",
+                    "br=840",
+                    "CMCD-Request",
+                    "bl=500",
+                    "CMCD-Session",
+                    "cid=\"mediaId\"",
+                    "CMCD-Status",
+                    "bs",
+                    "headerKey2",
+                    "headerValue2"))
+            .build();
+
+    DataSpec updatedDataSpec = CmcdData.removeFromDataSpec(dataSpec);
+
+    assertThat(updatedDataSpec.uri.toString()).isEqualTo("https://test.test/test.mp4");
+    assertThat(updatedDataSpec.httpRequestHeaders)
+        .containsExactly("headerKey1", "headerValue1", "headerKey2", "headerValue2");
+  }
+
+  @Test
+  public void removeFromUri_noCmcdData_returnsUnmodifiedUri() {
+    Uri uri = Uri.parse("https://test.test/test.mp4?key=value&cMcD=test&key2=value2");
+
+    Uri updatedUri = CmcdData.removeFromUri(uri);
+
+    assertThat(updatedUri).isEqualTo(uri);
+  }
+
+  @Test
+  public void removeFromUri_cmcdDataQueryParameter_removesQueryParameter() {
+    Uri uri =
+        Uri.parse(
+            "https://test.test/test.mp4?key=value&CMCD=bl%3D1800%2Cbr%3D840%2Cbs&key2=value2");
+
+    Uri updatedUri = CmcdData.removeFromUri(uri);
+
+    assertThat(updatedUri.toString()).isEqualTo("https://test.test/test.mp4?key=value&key2=value2");
+  }
+
+  @Test
+  public void removeFromUri_nonHierarchicalUri_returnsUnmodifiedUri() {
+    Uri uri = Uri.parse("data:application/dash+xml;base64");
+
+    Uri updatedUri = CmcdData.removeFromUri(uri);
+
+    assertThat(updatedUri).isEqualTo(uri);
   }
 }

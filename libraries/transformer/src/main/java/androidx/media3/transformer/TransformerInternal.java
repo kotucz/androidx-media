@@ -16,10 +16,9 @@
 
 package androidx.media3.transformer;
 
+import static android.os.Build.VERSION.SDK_INT;
 import static androidx.media3.common.C.TRACK_TYPE_AUDIO;
 import static androidx.media3.common.C.TRACK_TYPE_VIDEO;
-import static androidx.media3.common.util.Assertions.checkArgument;
-import static androidx.media3.common.util.Assertions.checkState;
 import static androidx.media3.common.util.Util.contains;
 import static androidx.media3.effect.DebugTraceUtil.COMPONENT_TRANSFORMER_INTERNAL;
 import static androidx.media3.effect.DebugTraceUtil.EVENT_START;
@@ -38,6 +37,9 @@ import static androidx.media3.transformer.TransformerUtil.getValidColor;
 import static androidx.media3.transformer.TransformerUtil.maybeSetMuxerWrapperAdditionalRotationDegrees;
 import static androidx.media3.transformer.TransformerUtil.shouldTranscodeAudio;
 import static androidx.media3.transformer.TransformerUtil.shouldTranscodeVideo;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.Math.max;
 import static java.lang.annotation.ElementType.TYPE_USE;
 
@@ -46,8 +48,9 @@ import android.media.metrics.LogSessionId;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.Message;
-import android.util.Log;
 import android.util.SparseArray;
+import android.util.SparseBooleanArray;
+import android.util.SparseIntArray;
 import androidx.annotation.GuardedBy;
 import androidx.annotation.IntDef;
 import androidx.annotation.IntRange;
@@ -63,8 +66,11 @@ import androidx.media3.common.VideoFrameProcessor;
 import androidx.media3.common.util.Clock;
 import androidx.media3.common.util.ConditionVariable;
 import androidx.media3.common.util.HandlerWrapper;
+import androidx.media3.common.util.Log;
 import androidx.media3.common.util.Util;
+import androidx.media3.common.video.FrameProcessor;
 import androidx.media3.effect.DebugTraceUtil;
+import androidx.media3.effect.HardwareBufferJniWrapper;
 import androidx.media3.muxer.MuxerException;
 import androidx.media3.transformer.AssetLoader.CompositionSettings;
 import com.google.common.collect.ImmutableList;
@@ -127,6 +133,10 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   private final Listener listener;
   private final HandlerWrapper applicationHandler;
   private final Clock clock;
+
+  @Nullable private final FrameProcessor.Factory frameProcessorFactory;
+
+  @Nullable private final HardwareBufferJniWrapper hardwareBufferJniWrapper;
 
   /**
    * The presentation timestamp offset for all the video samples. It will be set when resuming video
@@ -192,7 +202,7 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       Context context,
       Composition composition,
       TransformationRequest transformationRequest,
-      AssetLoader.Factory assetLoaderFactory,
+      @Nullable AssetLoader.Factory assetLoaderFactory,
       AudioMixer.Factory audioMixerFactory,
       VideoFrameProcessor.Factory videoFrameProcessorFactory,
       Codec.EncoderFactory encoderFactory,
@@ -204,9 +214,12 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       HandlerWrapper applicationHandler,
       DebugViewProvider debugViewProvider,
       Clock clock,
+      @Nullable FrameProcessor.Factory frameProcessorFactory,
+      @Nullable HardwareBufferJniWrapper hardwareBufferJniWrapper,
       long videoSampleTimestampOffsetUs,
       @Nullable LogSessionId logSessionId,
-      boolean applyMp4EditListTrim) {
+      boolean applyMp4EditListTrim,
+      boolean forceRemuxing) {
     this.context = context;
     this.composition = composition;
     this.encoderFactory = new CapturingEncoderFactory(encoderFactory);
@@ -215,6 +228,8 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     this.listener = listener;
     this.applicationHandler = applicationHandler;
     this.clock = clock;
+    this.frameProcessorFactory = frameProcessorFactory;
+    this.hardwareBufferJniWrapper = hardwareBufferJniWrapper;
     this.videoSampleTimestampOffsetUs = videoSampleTimestampOffsetUs;
     this.muxerWrapper = muxerWrapper;
     this.applyMp4EditListTrim = applyMp4EditListTrim;
@@ -237,6 +252,11 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     Looper internalLooper = internalHandlerThread.getLooper();
     assetLoaderLock = new Object();
     assetLoaderInputTracker = new AssetLoaderInputTracker(composition);
+    if (forceRemuxing || assetLoaderFactory == null) {
+      assetLoaderFactory =
+          new DefaultAssetLoaderFactory(
+              context, new DefaultDecoderFactory.Builder(context).build(), clock, logSessionId);
+    }
     for (int i = 0; i < composition.sequences.size(); i++) {
       SequenceAssetLoaderListener sequenceAssetLoaderListener =
           new SequenceAssetLoaderListener(
@@ -667,10 +687,10 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
         GraphInput sampleExporterInput =
             sampleExporter.getInput(firstEditedMediaItem, assetLoaderOutputFormat, sequenceIndex);
         OnMediaItemChangedListener onMediaItemChangedListener =
-            (editedMediaItem, durationUs, decodedFormat, isLast) -> {
+            (editedMediaItem, durationUs, decodedFormat, isLast, positionOffsetUs) -> {
               onMediaItemChanged(trackType, durationUs, isLast);
               sampleExporterInput.onMediaItemChanged(
-                  editedMediaItem, durationUs, decodedFormat, isLast);
+                  editedMediaItem, durationUs, decodedFormat, isLast, positionOffsetUs);
             };
         sequenceAssetLoaders
             .get(sequenceIndex)
@@ -742,25 +762,51 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
                   "assetLoaderOutputFormat has to have a audio, video or image mimetype."));
         }
 
-        assetLoaderInputTracker.registerSampleExporter(
-            C.TRACK_TYPE_VIDEO,
-            new VideoSampleExporter(
-                context,
-                firstFormat,
-                transformationRequest,
-                composition.videoCompositorSettings,
-                composition.effects.videoEffects,
-                videoFrameProcessorFactory,
-                encoderFactory,
-                muxerWrapper,
-                /* errorConsumer= */ this::onError,
-                fallbackListener,
-                debugViewProvider,
-                videoSampleTimestampOffsetUs,
-                /* hasMultipleInputs= */ assetLoaderInputTracker.hasMultipleConcurrentVideoTracks(),
-                allowedEncodingRotationDegrees,
-                maxFramesInEncoder,
-                logSessionId));
+        if (frameProcessorFactory == null) {
+          assetLoaderInputTracker.registerSampleExporter(
+              C.TRACK_TYPE_VIDEO,
+              new VideoSampleExporter(
+                  context,
+                  firstFormat,
+                  transformationRequest,
+                  composition.videoCompositorSettings,
+                  composition.effects.videoEffects,
+                  videoFrameProcessorFactory,
+                  encoderFactory,
+                  muxerWrapper,
+                  /* errorConsumer= */ this::onError,
+                  fallbackListener,
+                  debugViewProvider,
+                  videoSampleTimestampOffsetUs,
+                  /* hasMultipleInputs= */ assetLoaderInputTracker
+                      .hasMultipleConcurrentVideoTracks(),
+                  allowedEncodingRotationDegrees,
+                  maxFramesInEncoder,
+                  logSessionId));
+        } else {
+          Looper internalLooper = internalHandlerThread.getLooper();
+          if (SDK_INT < 26) {
+            throw new IllegalStateException(
+                "API 26+ required to use PacketProcessor in Transformer");
+          }
+          PacketConsumerVideoSampleExporter videoSampleExporter =
+              new PacketConsumerVideoSampleExporter(
+                  context,
+                  composition,
+                  firstFormat,
+                  transformationRequest,
+                  checkNotNull(frameProcessorFactory),
+                  hardwareBufferJniWrapper,
+                  encoderFactory,
+                  muxerWrapper,
+                  /* errorConsumer= */ this::onError,
+                  fallbackListener,
+                  allowedEncodingRotationDegrees,
+                  logSessionId,
+                  internalLooper,
+                  clock.createHandler(internalLooper, /* callback= */ null));
+          assetLoaderInputTracker.registerSampleExporter(C.TRACK_TYPE_VIDEO, videoSampleExporter);
+        }
       }
     }
 
@@ -854,15 +900,15 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
                     sequenceIndex,
                     transformationRequest,
                     encoderFactory,
-                    muxerWrapper)
+                    muxerWrapper,
+                    /* hasFrameProcessorFactory= */ frameProcessorFactory != null)
                 || clippingRequiresTranscode(firstEditedMediaItem.mediaItem);
         checkState(
             !applyMp4EditListTrim || !shouldTranscode,
-            String.format(
-                "Transcoding is required for track %s but MP4 edit list trimming is enabled."
-                    + " Disable mp4EditListTrimEnabled or ensure this track does not require"
-                    + " transcoding.",
-                inputFormat));
+            "Transcoding is required for track %s but MP4 edit list trimming is enabled."
+                + " Disable mp4EditListTrimEnabled or ensure this track does not require"
+                + " transcoding.",
+            inputFormat);
       }
       checkState(!shouldTranscode || assetLoaderCanOutputDecoded);
 
@@ -882,8 +928,8 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   private static final class AssetLoaderInputTracker {
     private final List<SequenceMetadata> sequencesMetadata;
     private final SparseArray<SampleExporter> trackTypeToSampleExporter;
-    private final SparseArray<Boolean> trackTypeToShouldTranscode;
-    private final SparseArray<Integer> trackTypeToNumberOfRegisteredGraphInput;
+    private final SparseBooleanArray trackTypeToShouldTranscode;
+    private final SparseIntArray trackTypeToNumberOfRegisteredGraphInput;
 
     public AssetLoaderInputTracker(Composition composition) {
       sequencesMetadata = new ArrayList<>();
@@ -891,8 +937,8 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
         sequencesMetadata.add(new SequenceMetadata());
       }
       trackTypeToSampleExporter = new SparseArray<>();
-      trackTypeToShouldTranscode = new SparseArray<>();
-      trackTypeToNumberOfRegisteredGraphInput = new SparseArray<>();
+      trackTypeToShouldTranscode = new SparseBooleanArray();
+      trackTypeToNumberOfRegisteredGraphInput = new SparseIntArray();
     }
 
     /**

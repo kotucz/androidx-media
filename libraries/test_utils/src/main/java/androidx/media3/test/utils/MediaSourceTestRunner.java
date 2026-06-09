@@ -15,7 +15,8 @@
  */
 package androidx.media3.test.utils;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -28,7 +29,6 @@ import android.util.Pair;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Timeline;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
@@ -41,6 +41,7 @@ import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
 import androidx.media3.exoplayer.source.MediaSource.MediaSourceCaller;
 import androidx.media3.exoplayer.source.MediaSourceEventListener;
 import androidx.media3.exoplayer.upstream.Allocator;
+import androidx.media3.exoplayer.upstream.BandwidthMeter;
 import androidx.media3.exoplayer.upstream.DefaultAllocator;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
@@ -137,8 +138,7 @@ public class MediaSourceTestRunner {
     final IOException[] prepareError = new IOException[1];
     runOnPlaybackThread(
         () -> {
-          mediaSource.prepareSource(
-              mediaSourceListener, /* mediaTransferListener= */ null, PlayerId.UNSET);
+          mediaSource.prepareSource(mediaSourceListener, PlayerId.UNSET, BandwidthMeter.NO_OP);
           try {
             // TODO: This only catches errors that are set synchronously in prepareSource. To
             // capture async errors we'll need to poll maybeThrowSourceInfoRefreshError until the
@@ -366,7 +366,7 @@ public class MediaSourceTestRunner {
 
     @Override
     public void onSourceInfoRefreshed(MediaSource source, Timeline timeline) {
-      Assertions.checkState(Looper.myLooper() == playbackThread.getLooper());
+      checkState(Looper.myLooper() == playbackThread.getLooper());
       timelines.addLast(timeline);
     }
 
@@ -379,7 +379,7 @@ public class MediaSourceTestRunner {
         LoadEventInfo loadEventInfo,
         MediaLoadData mediaLoadData,
         int retryCount) {
-      Assertions.checkState(Looper.myLooper() == playbackThread.getLooper());
+      checkState(Looper.myLooper() == playbackThread.getLooper());
     }
 
     @Override
@@ -388,7 +388,7 @@ public class MediaSourceTestRunner {
         @Nullable MediaPeriodId mediaPeriodId,
         LoadEventInfo loadEventInfo,
         MediaLoadData mediaLoadData) {
-      Assertions.checkState(Looper.myLooper() == playbackThread.getLooper());
+      checkState(Looper.myLooper() == playbackThread.getLooper());
       completedLoads.add(Pair.create(windowIndex, mediaPeriodId));
     }
 
@@ -398,7 +398,7 @@ public class MediaSourceTestRunner {
         @Nullable MediaPeriodId mediaPeriodId,
         LoadEventInfo loadEventInfo,
         MediaLoadData mediaLoadData) {
-      Assertions.checkState(Looper.myLooper() == playbackThread.getLooper());
+      checkState(Looper.myLooper() == playbackThread.getLooper());
     }
 
     @Override
@@ -409,19 +409,19 @@ public class MediaSourceTestRunner {
         MediaLoadData mediaLoadData,
         IOException error,
         boolean wasCanceled) {
-      Assertions.checkState(Looper.myLooper() == playbackThread.getLooper());
+      checkState(Looper.myLooper() == playbackThread.getLooper());
     }
 
     @Override
     public void onUpstreamDiscarded(
         int windowIndex, @Nullable MediaPeriodId mediaPeriodId, MediaLoadData mediaLoadData) {
-      Assertions.checkState(Looper.myLooper() == playbackThread.getLooper());
+      checkState(Looper.myLooper() == playbackThread.getLooper());
     }
 
     @Override
     public void onDownstreamFormatChanged(
         int windowIndex, @Nullable MediaPeriodId mediaPeriodId, MediaLoadData mediaLoadData) {
-      Assertions.checkState(Looper.myLooper() == playbackThread.getLooper());
+      checkState(Looper.myLooper() == playbackThread.getLooper());
     }
   }
 }

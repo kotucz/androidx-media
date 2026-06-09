@@ -16,7 +16,7 @@
 package androidx.media3.cast;
 
 import static androidx.media3.cast.CastTimeline.ItemData.UNKNOWN_CONTENT_ID;
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import android.util.SparseArray;
 import androidx.annotation.Nullable;

@@ -15,8 +15,8 @@
  */
 package androidx.media3.transformer.mh.performance;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.transformer.AndroidTestUtil.MP4_LONG_ASSET_WITH_INCREASING_TIMESTAMPS;
+import static androidx.media3.test.utils.AssetInfo.MP4_LONG_ASSET_WITH_INCREASING_TIMESTAMPS;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.truth.Truth.assertThat;
 
 import android.app.Instrumentation;
@@ -38,10 +38,12 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.junit.After;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
 /** Performance tests for the effects previewing pipeline in ExoPlayer. */
+@Ignore("Only intended to run on internal infra: b/396671260")
 @RunWith(AndroidJUnit4.class)
 public class VideoEffectsPreviewPerformanceTest {
 
@@ -50,6 +52,8 @@ public class VideoEffectsPreviewPerformanceTest {
 
   private final Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
   private @MonotonicNonNull ExoPlayer player;
+  private @MonotonicNonNull SurfaceTexture surfaceTexture;
+  private @MonotonicNonNull Surface surface;
 
   @After
   public void tearDown() {
@@ -57,6 +61,12 @@ public class VideoEffectsPreviewPerformanceTest {
         () -> {
           if (player != null) {
             player.release();
+          }
+          if (surface != null) {
+            surface.release();
+          }
+          if (surfaceTexture != null) {
+            surfaceTexture.release();
           }
         });
   }
@@ -73,7 +83,9 @@ public class VideoEffectsPreviewPerformanceTest {
           player = new ExoPlayer.Builder(ApplicationProvider.getApplicationContext()).build();
           // Set a surface on the player even though there is no UI on this test. We need a surface
           // otherwise the player will skip/drop video frames.
-          player.setVideoSurface(new Surface(new SurfaceTexture(0)));
+          surfaceTexture = new SurfaceTexture(0);
+          surface = new Surface(surfaceTexture);
+          player.setVideoSurface(surface);
           player.setPlayWhenReady(false);
           player.setVideoEffects(ImmutableList.of());
           player.addListener(listener);
@@ -102,7 +114,7 @@ public class VideoEffectsPreviewPerformanceTest {
 
     assertThat(playbackDurationMs)
         .isIn(Range.closed(expectedPlaybackDurationMs, expectedPlaybackDurationMs + 60));
-    DecoderCounters decoderCounters = checkNotNull(listener.getDecoderCounters());
+    DecoderCounters decoderCounters = checkNotNull(listener.getVideoDecoderCounters());
     assertThat(decoderCounters.droppedBufferCount).isEqualTo(0);
     assertThat(decoderCounters.skippedInputBufferCount).isEqualTo(0);
     assertThat(decoderCounters.skippedOutputBufferCount).isEqualTo(0);

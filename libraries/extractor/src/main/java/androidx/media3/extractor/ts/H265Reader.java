@@ -15,6 +15,7 @@
  */
 package androidx.media3.extractor.ts;
 
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
 import androidx.annotation.Nullable;
@@ -22,7 +23,6 @@ import androidx.media3.common.C;
 import androidx.media3.common.ColorInfo;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.CodecSpecificDataUtil;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.common.util.UnstableApi;
@@ -173,15 +173,13 @@ public final class H265Reader implements ElementaryStreamReader {
   }
 
   @Override
-  public void packetFinished(boolean isEndOfInput) {
+  public void endOfInputReached() {
     assertTracksCreated();
-    if (isEndOfInput) {
-      seiReader.flush();
-      // Simulate end of current NAL unit and start an unspecified one to trigger output of current
-      // sample
-      endNalUnit(totalBytesWritten, 0, 0, pesTimeUs);
-      startNalUnit(totalBytesWritten, 0, NalUnitUtil.H265_NAL_UNIT_TYPE_UNSPECIFIED, pesTimeUs);
-    }
+    seiReader.flush();
+    // Simulate end of current NAL unit and start an unspecified one to trigger output of current
+    // sample
+    endNalUnit(totalBytesWritten, 0, 0, pesTimeUs);
+    startNalUnit(totalBytesWritten, 0, NalUnitUtil.H265_NAL_UNIT_TYPE_UNSPECIFIED, pesTimeUs);
   }
 
   @RequiresNonNull("sampleReader")
@@ -295,7 +293,7 @@ public final class H265Reader implements ElementaryStreamReader {
 
   @EnsuresNonNull({"output", "sampleReader"})
   private void assertTracksCreated() {
-    Assertions.checkStateNotNull(output);
+    checkNotNull(output);
     Util.castNonNull(sampleReader);
   }
 

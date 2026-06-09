@@ -16,6 +16,7 @@
 package androidx.media3.extractor.flac;
 
 import static androidx.media3.common.util.Util.castNonNull;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.lang.annotation.ElementType.TYPE_USE;
@@ -26,7 +27,6 @@ import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.extractor.Extractor;
@@ -73,7 +73,7 @@ public final class FlacExtractor implements Extractor {
   @Target(TYPE_USE)
   @IntDef(
       flag = true,
-      value = {FLAG_DISABLE_ID3_METADATA})
+      value = {FLAG_DISABLE_ID3_METADATA, FLAG_DISABLE_ARTWORK_METADATA})
   public @interface Flags {}
 
   /**
@@ -81,6 +81,9 @@ public final class FlacExtractor implements Extractor {
    * required.
    */
   public static final int FLAG_DISABLE_ID3_METADATA = 1;
+
+  /** Flag to disable parsing of artwork metadata. */
+  public static final int FLAG_DISABLE_ARTWORK_METADATA = 1 << 1;
 
   // LINT.ThenChange(../../../../../../../../decoder_flac/src/main/java/androidx/media3/decoder/flac/FlacExtractor.java)
 
@@ -114,6 +117,7 @@ public final class FlacExtractor implements Extractor {
   private final byte[] streamMarkerAndInfoBlock;
   private final ParsableByteArray buffer;
   private final boolean id3MetadataDisabled;
+  private final boolean ignoreArtwork;
 
   private final SampleNumberHolder sampleNumberHolder;
 
@@ -145,13 +149,16 @@ public final class FlacExtractor implements Extractor {
         new byte[FlacConstants.STREAM_MARKER_SIZE + FlacConstants.STREAM_INFO_BLOCK_SIZE];
     buffer = new ParsableByteArray(new byte[BUFFER_LENGTH], /* limit= */ 0);
     id3MetadataDisabled = (flags & FLAG_DISABLE_ID3_METADATA) != 0;
+    ignoreArtwork = (flags & FLAG_DISABLE_ARTWORK_METADATA) != 0;
     sampleNumberHolder = new SampleNumberHolder();
     state = STATE_READ_ID3_METADATA;
   }
 
   @Override
   public boolean sniff(ExtractorInput input) throws IOException {
-    FlacMetadataReader.peekId3Metadata(input, /* parseData= */ false);
+    Metadata unused =
+        FlacMetadataReader.peekId3Metadata(
+            input, /* parseData= */ false, /* ignoreArtwork= */ false);
     return FlacMetadataReader.checkAndPeekStreamMarker(input);
   }
 
@@ -208,7 +215,9 @@ public final class FlacExtractor implements Extractor {
   // Private methods.
 
   private void readId3Metadata(ExtractorInput input) throws IOException {
-    id3Metadata = FlacMetadataReader.readId3Metadata(input, /* parseData= */ !id3MetadataDisabled);
+    id3Metadata =
+        FlacMetadataReader.readId3Metadata(
+            input, /* parseData= */ !id3MetadataDisabled, ignoreArtwork);
     state = STATE_GET_STREAM_MARKER_AND_INFO_BLOCK_BYTES;
   }
 
@@ -228,12 +237,13 @@ public final class FlacExtractor implements Extractor {
     FlacMetadataReader.FlacStreamMetadataHolder metadataHolder =
         new FlacMetadataReader.FlacStreamMetadataHolder(flacStreamMetadata);
     while (!isLastMetadataBlock) {
-      isLastMetadataBlock = FlacMetadataReader.readMetadataBlock(input, metadataHolder);
+      isLastMetadataBlock =
+          FlacMetadataReader.readMetadataBlock(input, metadataHolder, ignoreArtwork);
       // Save the current metadata in case an exception occurs.
       flacStreamMetadata = castNonNull(metadataHolder.flacStreamMetadata);
     }
 
-    Assertions.checkNotNull(flacStreamMetadata);
+    checkNotNull(flacStreamMetadata);
     minFrameSize = max(flacStreamMetadata.minFrameSize, FlacConstants.MIN_FRAME_HEADER_SIZE);
     Format format = flacStreamMetadata.getFormat(streamMarkerAndInfoBlock, id3Metadata);
     castNonNull(trackOutput)
@@ -256,8 +266,8 @@ public final class FlacExtractor implements Extractor {
 
   private @ReadResult int readFrames(ExtractorInput input, PositionHolder seekPosition)
       throws IOException {
-    Assertions.checkNotNull(trackOutput);
-    Assertions.checkNotNull(flacStreamMetadata);
+    checkNotNull(trackOutput);
+    checkNotNull(flacStreamMetadata);
 
     // Handle pending binary search seek if necessary.
     if (binarySearchSeeker != null && binarySearchSeeker.isSeeking()) {
@@ -328,7 +338,7 @@ public final class FlacExtractor implements Extractor {
   }
 
   private SeekMap getSeekMap(long firstFramePosition, long streamLength) {
-    Assertions.checkNotNull(flacStreamMetadata);
+    checkNotNull(flacStreamMetadata);
     if (flacStreamMetadata.seekTable != null
         && flacStreamMetadata.seekTable.pointSampleNumbers.length > 0) {
       return new FlacSeekTableSeekMap(flacStreamMetadata, firstFramePosition);
@@ -356,7 +366,7 @@ public final class FlacExtractor implements Extractor {
    *     the search was not successful.
    */
   private long findFrame(ParsableByteArray data, boolean foundEndOfInput) {
-    Assertions.checkNotNull(flacStreamMetadata);
+    checkNotNull(flacStreamMetadata);
 
     int frameOffset = data.getPosition();
     while (frameOffset <= data.limit() - FlacConstants.MAX_FRAME_HEADER_SIZE) {

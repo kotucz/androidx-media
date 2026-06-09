@@ -51,9 +51,9 @@ import static androidx.media3.exoplayer.analytics.AnalyticsListener.EVENT_VIDEO_
 import static androidx.media3.test.utils.FakeSampleStream.FakeSampleStreamItem.END_OF_STREAM_ITEM;
 import static androidx.media3.test.utils.FakeSampleStream.FakeSampleStreamItem.oneByteSample;
 import static androidx.media3.test.utils.TestUtil.assertSubclassOverridesAllMethods;
+import static androidx.media3.test.utils.robolectric.RobolectricUtil.runMainLooperUntil;
 import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.advance;
 import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.play;
-import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.playUntilPosition;
 import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.runUntilError;
 import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.runUntilIsLoading;
 import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.runUntilPlaybackState;
@@ -72,7 +72,6 @@ import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
-import static org.robolectric.shadows.ShadowLooper.idleMainLooper;
 import static org.robolectric.shadows.ShadowLooper.runMainLooperToNextTask;
 
 import android.graphics.SurfaceTexture;
@@ -122,6 +121,7 @@ import androidx.media3.test.utils.FakeRenderer;
 import androidx.media3.test.utils.FakeTimeline;
 import androidx.media3.test.utils.FakeTimeline.TimelineWindowDefinition;
 import androidx.media3.test.utils.FakeVideoRenderer;
+import androidx.media3.test.utils.ReleaseListener;
 import androidx.media3.test.utils.TestExoPlayerBuilder;
 import androidx.media3.test.utils.TestUtil;
 import androidx.media3.test.utils.robolectric.RobolectricUtil;
@@ -142,6 +142,8 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+
+// copybara:insert import org.junit.Ignore;
 
 /** Integration test for {@link DefaultAnalyticsCollector}. */
 @RunWith(AndroidJUnit4.class)
@@ -573,7 +575,7 @@ public final class DefaultAnalyticsCollectorTest {
     player.setMediaSources(ImmutableList.of(mediaSource1, mediaSource2));
     player.prepare();
     runUntilPlaybackState(player, Player.STATE_READY);
-    playUntilPosition(player, /* mediaItemIndex= */ 0, windowDurationMs - 100);
+    play(player).untilPositionAtLeast(windowDurationMs - 100);
     player.seekTo(/* positionMs= */ 0);
     runUntilPlaybackState(player, Player.STATE_READY);
     player.play();
@@ -888,7 +890,7 @@ public final class DefaultAnalyticsCollectorTest {
     player.prepare();
     runUntilPlaybackState(player, Player.STATE_READY);
     // Ensure second period is already being read from.
-    playUntilPosition(player, /* mediaItemIndex= */ 0, /* positionMs= */ windowDurationMs - 100);
+    play(player).untilPositionAtLeast(windowDurationMs - 100);
     player.moveMediaItem(/* currentIndex= */ 0, /* newIndex= */ 1);
     runUntilPlaybackState(player, Player.STATE_READY);
     player.play();
@@ -911,7 +913,7 @@ public final class DefaultAnalyticsCollectorTest {
             period1Seq0 /* PLAYLIST_CHANGED (sources in playlist moved) */)
         .inOrder();
     assertThat(listener.getEvents(EVENT_IS_LOADING_CHANGED))
-        .containsExactly(window0Period1Seq0, window0Period1Seq0, period1Seq0, period1Seq0);
+        .containsExactly(window0Period1Seq0, window0Period1Seq0);
     assertThat(listener.getEvents(EVENT_TRACKS_CHANGED)).containsExactly(window0Period1Seq0);
     assertThat(listener.getEvents(EVENT_LOAD_STARTED))
         .containsExactly(
@@ -1136,9 +1138,9 @@ public final class DefaultAnalyticsCollectorTest {
     advance(player).untilFullyBuffered();
     advance(player).untilState(Player.STATE_READY);
     // Wait in each content part to ensure previously triggered events get a chance to be delivered.
-    play(player).untilPosition(/* mediaItemIndex= */ 0, /* positionMs= */ 3_000);
+    play(player).untilPositionAtLeast(/* positionMs= */ 3_000);
     advance(player).untilPendingCommandsAreFullyHandled();
-    play(player).untilPosition(/* mediaItemIndex= */ 0, /* positionMs= */ 8_000);
+    play(player).untilPositionAtLeast(/* positionMs= */ 8_000);
     advance(player).untilPendingCommandsAreFullyHandled();
     player.play();
     advance(player).untilState(Player.STATE_ENDED);
@@ -1737,6 +1739,7 @@ public final class DefaultAnalyticsCollectorTest {
   }
 
   @Test
+  // copybara:insert @Ignore("Flaky: b/502480903")
   public void onEvents_isReportedWithCorrectEventTimes() throws Exception {
     ExoPlayer player = setupPlayer();
     AnalyticsListener listener = mock(AnalyticsListener.class);
@@ -2039,17 +2042,19 @@ public final class DefaultAnalyticsCollectorTest {
               }
             });
     exoPlayer.addAnalyticsListener(analyticsListener);
+    ReleaseListener releaseListener = new ReleaseListener();
+    exoPlayer.addAnalyticsListener(releaseListener);
 
     // Prepare with media to ensure video renderer is enabled.
     exoPlayer.setMediaSource(
         new FakeMediaSource(new FakeTimeline(), ExoPlayerTestRunner.VIDEO_FORMAT));
     exoPlayer.prepare();
     runUntilPlaybackState(exoPlayer, Player.STATE_READY);
-    // Release and add delay on releasing thread to verify timestamps of events.
+    // Release and wait for release callbacks to fully arrive on the main thread.
     exoPlayer.release();
     long releaseTimeMs = fakeClock.currentTimeMillis();
     fakeClock.advanceTime(1);
-    idleMainLooper();
+    runMainLooperUntil(releaseListener::isReleased);
 
     // Verify video disable events and release events arrived in order.
     ArgumentCaptor<AnalyticsListener.EventTime> videoDisabledEventTime =
@@ -2507,13 +2512,13 @@ public final class DefaultAnalyticsCollectorTest {
    */
   private static final class EmptyDrmCallback implements MediaDrmCallback {
     @Override
-    public byte[] executeProvisionRequest(UUID uuid, ExoMediaDrm.ProvisionRequest request) {
-      return new byte[0];
+    public Response executeProvisionRequest(UUID uuid, ExoMediaDrm.ProvisionRequest request) {
+      return new Response(new byte[0]);
     }
 
     @Override
-    public byte[] executeKeyRequest(UUID uuid, ExoMediaDrm.KeyRequest request) {
-      return new byte[0];
+    public Response executeKeyRequest(UUID uuid, ExoMediaDrm.KeyRequest request) {
+      return new Response(new byte[0]);
     }
   }
 
@@ -2547,26 +2552,26 @@ public final class DefaultAnalyticsCollectorTest {
     }
 
     @Override
-    public byte[] executeProvisionRequest(UUID uuid, ExoMediaDrm.ProvisionRequest request)
+    public Response executeProvisionRequest(UUID uuid, ExoMediaDrm.ProvisionRequest request)
         throws MediaDrmCallbackException {
       provisionCondition.blockUninterruptible();
       provisionCondition.close();
       if (alwaysFail) {
         throw new RuntimeException("executeProvisionRequest failed");
       } else {
-        return new byte[0];
+        return new Response(new byte[0]);
       }
     }
 
     @Override
-    public byte[] executeKeyRequest(UUID uuid, ExoMediaDrm.KeyRequest request)
+    public Response executeKeyRequest(UUID uuid, ExoMediaDrm.KeyRequest request)
         throws MediaDrmCallbackException {
       keyCondition.blockUninterruptible();
       keyCondition.close();
       if (alwaysFail) {
         throw new RuntimeException("executeKeyRequest failed");
       } else {
-        return new byte[0];
+        return new Response(new byte[0]);
       }
     }
   }

@@ -15,8 +15,8 @@
  */
 package androidx.media3.exoplayer.video;
 
-import static androidx.media3.common.util.Assertions.checkState;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import android.graphics.Bitmap;
 import android.view.Surface;
@@ -55,8 +55,10 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 /* package */ final class DefaultVideoSink implements VideoSink {
 
   private final VideoFrameReleaseControl videoFrameReleaseControl;
+  private final VideoFrameReleaseEarlyTimeForecaster videoFrameReleaseEarlyTimeForecaster;
   private final VideoFrameRenderControl videoFrameRenderControl;
   private final Queue<VideoFrameHandler> videoFrameHandlers;
+  private final FixedFrameRateEstimator frameRateEstimator;
 
   @Nullable private Surface outputSurface;
   private Format inputFormat;
@@ -65,11 +67,22 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   private Executor listenerExecutor;
   private VideoFrameMetadataListener videoFrameMetadataListener;
 
-  public DefaultVideoSink(VideoFrameReleaseControl videoFrameReleaseControl, Clock clock) {
+  public DefaultVideoSink(
+      VideoFrameReleaseControl videoFrameReleaseControl,
+      VideoFrameReleaseEarlyTimeForecaster videoFrameReleaseEarlyTimeForecaster,
+      Clock clock) {
     this.videoFrameReleaseControl = videoFrameReleaseControl;
+    this.videoFrameReleaseEarlyTimeForecaster = videoFrameReleaseEarlyTimeForecaster;
     videoFrameReleaseControl.setClock(clock);
+    frameRateEstimator =
+        new FixedFrameRateEstimator(
+            frameRate -> videoFrameReleaseControl.setSurfaceMediaFrameRate(frameRate));
     videoFrameRenderControl =
-        new VideoFrameRenderControl(new FrameRendererImpl(), videoFrameReleaseControl);
+        new VideoFrameRenderControl(
+            new FrameRendererImpl(),
+            videoFrameReleaseControl,
+            videoFrameReleaseEarlyTimeForecaster,
+            frameRateEstimator);
     videoFrameHandlers = new ArrayDeque<>();
     inputFormat = new Format.Builder().build();
     streamStartPositionUs = C.TIME_UNSET;
@@ -80,11 +93,13 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
   @Override
   public void startRendering() {
+    videoFrameReleaseEarlyTimeForecaster.reset();
     videoFrameReleaseControl.onStarted();
   }
 
   @Override
   public void stopRendering() {
+    videoFrameReleaseEarlyTimeForecaster.reset();
     videoFrameReleaseControl.onStopped();
   }
 
@@ -120,6 +135,7 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     if (resetPosition) {
       videoFrameReleaseControl.reset();
     }
+    videoFrameReleaseEarlyTimeForecaster.reset();
     videoFrameRenderControl.flush();
     videoFrameHandlers.clear();
   }
@@ -146,7 +162,7 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
   @Override
   public Surface getInputSurface() {
-    return checkStateNotNull(outputSurface);
+    return checkNotNull(outputSurface);
   }
 
   @Override
@@ -213,7 +229,7 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       videoFrameRenderControl.onVideoSizeChanged(format.width, format.height);
     }
     if (format.frameRate != inputFormat.frameRate) {
-      videoFrameReleaseControl.setFrameRate(format.frameRate);
+      frameRateEstimator.onFormatChanged(format.frameRate);
     }
     inputFormat = format;
     if (startPositionUs != this.streamStartPositionUs) {

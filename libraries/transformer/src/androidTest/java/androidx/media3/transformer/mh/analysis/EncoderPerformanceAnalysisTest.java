@@ -16,15 +16,18 @@
 
 package androidx.media3.transformer.mh.analysis;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static androidx.media3.test.utils.AssetInfo.MP4_ASSET_1080P_5_SECOND_HLG10;
+import static androidx.media3.test.utils.AssetInfo.MP4_ASSET_H264_1080P_10SEC_VIDEO;
+import static androidx.media3.test.utils.AssetInfo.MP4_ASSET_H264_4K_10SEC_VIDEO;
 import static androidx.media3.transformer.VideoEncoderSettings.NO_VALUE;
 import static androidx.media3.transformer.VideoEncoderSettings.RATE_UNSET;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import android.content.Context;
 import android.net.Uri;
 import androidx.media3.common.MediaItem;
+import androidx.media3.test.utils.AssetInfo;
 import androidx.media3.transformer.AndroidTestUtil;
-import androidx.media3.transformer.AndroidTestUtil.AssetInfo;
 import androidx.media3.transformer.DefaultEncoderFactory;
 import androidx.media3.transformer.EditedMediaItem;
 import androidx.media3.transformer.Transformer;
@@ -34,6 +37,7 @@ import androidx.test.core.app.ApplicationProvider;
 import com.google.common.collect.ImmutableList;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.junit.Ignore;
@@ -52,9 +56,9 @@ public class EncoderPerformanceAnalysisTest {
 
   private static final ImmutableList<AssetInfo> INPUT_ASSETS =
       ImmutableList.of(
-          AndroidTestUtil.MP4_ASSET_H264_4K_10SEC_VIDEO,
-          AndroidTestUtil.MP4_ASSET_H264_1080P_10SEC_VIDEO,
-          AndroidTestUtil.MP4_ASSET_1080P_5_SECOND_HLG10);
+          MP4_ASSET_H264_4K_10SEC_VIDEO,
+          MP4_ASSET_H264_1080P_10SEC_VIDEO,
+          MP4_ASSET_1080P_5_SECOND_HLG10);
 
   private static final ImmutableList<Integer> OPERATING_RATE_AND_PRIORITIES =
       ImmutableList.of(RATE_UNSET, NO_VALUE);
@@ -186,12 +190,15 @@ public class EncoderPerformanceAnalysisTest {
     }
 
     public String getTestId() {
-      StringBuilder testIdBuilder = new StringBuilder();
-      testIdBuilder.append(
-          String.format(
-              "analyzePerformance_%s_Fallback_%d_OpRate_%d_Priority_%d_Profile_%d_Level_%d",
-              getFilename(), enableFallback ? 1 : 0, operatingRate, priority, profile, level));
-      return testIdBuilder.toString();
+      return String.format(
+          Locale.US,
+          "analyzePerformance_%s_Fallback_%d_OpRate_%d_Priority_%d_Profile_%d_Level_%d",
+          getFilename(),
+          enableFallback ? 1 : 0,
+          operatingRate,
+          priority,
+          profile,
+          level);
     }
 
     public Map<String, Object> getInputValues() {

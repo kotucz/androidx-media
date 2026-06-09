@@ -15,7 +15,6 @@
  */
 package androidx.media3.test.utils;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
 import static com.google.common.truth.Truth.assertWithMessage;
 
 import android.os.ConditionVariable;
@@ -24,6 +23,8 @@ import android.view.Surface;
 import android.widget.FrameLayout;
 import androidx.annotation.Nullable;
 import androidx.annotation.Size;
+import androidx.media3.common.MediaLibraryInfo;
+import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.Clock;
 import androidx.media3.common.util.HandlerWrapper;
@@ -34,7 +35,6 @@ import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlaybackException;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.analytics.AnalyticsListener;
-import androidx.media3.exoplayer.audio.DefaultAudioSink;
 import androidx.media3.exoplayer.drm.DrmSessionManager;
 import androidx.media3.exoplayer.source.MediaSource;
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
@@ -49,10 +49,9 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 public abstract class ExoHostedTest implements HostedTest {
 
   static {
-    // DefaultAudioSink is able to work around spurious timestamps reported by the platform (by
-    // ignoring them). Disable this workaround, since we're interested in testing that the
+    // Disable all device and codec-specific workarounds, since we're interested in testing that the
     // underlying platform is behaving correctly.
-    DefaultAudioSink.failOnSpuriousAudioTimestamp = true;
+    MediaLibraryInfo.setEnableWorkarounds(false);
   }
 
   public static final long MAX_PLAYING_TIME_DISCREPANCY_MS = 5000;
@@ -250,6 +249,15 @@ public abstract class ExoHostedTest implements HostedTest {
   }
 
   private final class AnalyticsListenerImpl implements AnalyticsListener {
+
+    @Override
+    public void onPlayerError(EventTime eventTime, PlaybackException error) {
+      // The exception is guaranteed to be an ExoPlaybackException because the underlying player
+      // is an ExoPlayer instance.
+      playerError = (ExoPlaybackException) error;
+      onPlayerErrorInternal(playerError);
+    }
+
     @Override
     public void onEvents(Player player, Events events) {
       if (events.contains(EVENT_IS_PLAYING_CHANGED)) {
@@ -258,12 +266,6 @@ public abstract class ExoHostedTest implements HostedTest {
         } else {
           totalPlayingTimeMs += SystemClock.elapsedRealtime() - lastPlayingStartTimeMs;
         }
-      }
-      if (events.contains(EVENT_PLAYER_ERROR)) {
-        // The exception is guaranteed to be an ExoPlaybackException because the underlying player
-        // is an ExoPlayer instance.
-        playerError = (ExoPlaybackException) checkNotNull(player.getPlayerError());
-        onPlayerErrorInternal(playerError);
       }
       if (events.contains(EVENT_PLAYBACK_STATE_CHANGED)) {
         @Player.State int playbackState = player.getPlaybackState();

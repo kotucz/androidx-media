@@ -15,12 +15,12 @@
  */
 package androidx.media3.exoplayer.ima;
 
-import static androidx.media3.common.util.Assertions.checkArgument;
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
 import static androidx.media3.exoplayer.ima.ImaUtil.BITRATE_UNSET;
 import static androidx.media3.exoplayer.ima.ImaUtil.TIMEOUT_UNSET;
 import static androidx.media3.exoplayer.ima.ImaUtil.getImaLooper;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import android.content.Context;
 import android.os.Looper;
@@ -127,6 +127,7 @@ public final class ImaAdsLoader implements AdsLoader {
     private boolean focusSkipButtonWhenAvailable;
     private boolean playAdBeforeStartPosition;
     private boolean debugModeEnabled;
+    private boolean enableCustomTabs;
     private ImaUtil.ImaFactory imaFactory;
 
     /**
@@ -142,6 +143,7 @@ public final class ImaAdsLoader implements AdsLoader {
       mediaBitrate = BITRATE_UNSET;
       focusSkipButtonWhenAvailable = true;
       playAdBeforeStartPosition = true;
+      enableCustomTabs = false;
       imaFactory = new DefaultImaFactory();
     }
 
@@ -280,6 +282,9 @@ public final class ImaAdsLoader implements AdsLoader {
      * <p>The purpose of this timeout is to avoid playback getting stuck in the unexpected case that
      * the IMA SDK does not load an ad break based on the player's reported content position.
      *
+     * <p>The value will be adjusted to be greater or equal to the one in {@link
+     * #setVastLoadTimeoutMs(int)} if provided.
+     *
      * @param adPreloadTimeoutMs The timeout buffering duration in milliseconds, or {@link
      *     C#TIME_UNSET} for no timeout.
      * @return This builder, for convenience.
@@ -319,6 +324,21 @@ public final class ImaAdsLoader implements AdsLoader {
     public Builder setMediaLoadTimeoutMs(@IntRange(from = 1) int mediaLoadTimeoutMs) {
       checkArgument(mediaLoadTimeoutMs > 0);
       this.mediaLoadTimeoutMs = mediaLoadTimeoutMs;
+      return this;
+    }
+
+    /**
+     * Sets whether to enable custom tabs for the ad click-through URLs. The default value is {@code
+     * false}.
+     *
+     * @param enableCustomTabs Whether to enable custom tabs for the ad click-through URLs.
+     * @return This builder, for convenience.
+     * @see AdsRenderingSettings#setEnableCustomTabs(boolean)
+     */
+    @CanIgnoreReturnValue
+    @UnstableApi
+    public Builder setEnableCustomTabs(boolean enableCustomTabs) {
+      this.enableCustomTabs = enableCustomTabs;
       return this;
     }
 
@@ -396,6 +416,9 @@ public final class ImaAdsLoader implements AdsLoader {
 
     /** Returns a new {@link ImaAdsLoader}. */
     public ImaAdsLoader build() {
+      if (vastLoadTimeoutMs != TIMEOUT_UNSET && adPreloadTimeoutMs < vastLoadTimeoutMs) {
+        adPreloadTimeoutMs = vastLoadTimeoutMs;
+      }
       return new ImaAdsLoader(
           context,
           new ImaUtil.Configuration(
@@ -404,6 +427,7 @@ public final class ImaAdsLoader implements AdsLoader {
               mediaLoadTimeoutMs,
               focusSkipButtonWhenAvailable,
               playAdBeforeStartPosition,
+              enableCustomTabs,
               mediaBitrate,
               enableContinuousPlayback,
               adMediaMimeTypes,

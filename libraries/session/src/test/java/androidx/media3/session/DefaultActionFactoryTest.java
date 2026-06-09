@@ -34,6 +34,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
+import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowPendingIntent;
 
 /** Tests for {@link DefaultActionFactory}. */
@@ -70,6 +71,25 @@ public class DefaultActionFactoryTest {
   }
 
   @Test
+  public void createMediaPendingIntent_withCustomSessionId_intentIsMediaAction() {
+    DefaultActionFactory actionFactory =
+        new DefaultActionFactory(Robolectric.setupService(TestService.class));
+    MediaSession mediaSessionWithDefaultId =
+        new MediaSession.Builder(ApplicationProvider.getApplicationContext(), player)
+            .setId("session-id")
+            .build();
+
+    PendingIntent pendingIntent =
+        actionFactory.createMediaActionPendingIntent(
+            mediaSessionWithDefaultId, Player.COMMAND_SEEK_FORWARD);
+
+    assertThat(actionFactory.isMediaAction(shadowOf(pendingIntent).getSavedIntent())).isTrue();
+    assertThat(shadowOf(pendingIntent).getSavedIntent().getData().toString())
+        .isEqualTo("androidx://media3.session/session-id");
+  }
+
+  @Test
+  @Config(minSdk = 26) // Context.startForegroundService is only available on API 26+
   public void createMediaPendingIntent_commandPlayPauseWhenNotPlayWhenReady_isForegroundService() {
     DefaultActionFactory actionFactory =
         new DefaultActionFactory(Robolectric.setupService(TestService.class));
@@ -82,6 +102,7 @@ public class DefaultActionFactoryTest {
   }
 
   @Test
+  @Config(minSdk = 26) // Context.startForegroundService is only available on API 26+
   public void createMediaPendingIntent_commandPlayPauseWhenPlayWhenReady_notAForegroundService() {
     DefaultActionFactory actionFactory =
         new DefaultActionFactory(Robolectric.setupService(TestService.class));
@@ -140,6 +161,22 @@ public class DefaultActionFactoryTest {
         .isEqualTo(R.drawable.media3_icon_pause);
     assertThat(notificationAction.getExtras().size()).isEqualTo(0);
     assertThat(notificationAction.getActionIntent()).isNotNull();
+  }
+
+  @Test
+  public void createNotificationDismissalIntent_containsDismissedEventFlagSetToTrue() {
+    DefaultActionFactory actionFactory =
+        new DefaultActionFactory(Robolectric.setupService(TestService.class));
+
+    ShadowPendingIntent pendingIntent =
+        shadowOf(actionFactory.createNotificationDismissalIntent(mediaSession));
+
+    assertThat(
+            pendingIntent
+                .getSavedIntent()
+                .getBooleanExtra(
+                    MediaNotification.NOTIFICATION_DISMISSED_EVENT_KEY, /* defaultValue= */ false))
+        .isTrue();
   }
 
   @Test

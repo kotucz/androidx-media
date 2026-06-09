@@ -15,7 +15,7 @@
  */
 package androidx.media3.exoplayer.source;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import android.net.Uri;
 import android.os.Looper;
@@ -95,6 +95,7 @@ public final class ProgressiveMediaSource extends BaseMediaSource
     @Nullable private Supplier<ReleasableExecutor> downloadExecutorSupplier;
     private int singleTrackId;
     @Nullable private Format singleTrackFormat;
+    private boolean loadOnlySelectedTracks;
 
     /**
      * Creates a new factory for {@link ProgressiveMediaSource}s.
@@ -259,8 +260,28 @@ public final class ProgressiveMediaSource extends BaseMediaSource
     @CanIgnoreReturnValue
     public <T extends Executor> Factory setDownloadExecutor(
         Supplier<T> downloadExecutor, Consumer<T> downloadExecutorReleaser) {
-      this.downloadExecutorSupplier =
-          () -> ReleasableExecutor.from(downloadExecutor.get(), downloadExecutorReleaser);
+      setDownloadExecutor(
+          () -> ReleasableExecutor.from(downloadExecutor.get(), downloadExecutorReleaser));
+      return this;
+    }
+
+    @CanIgnoreReturnValue
+    @Override
+    public MediaSource.Factory setDownloadExecutor(Supplier<ReleasableExecutor> downloadExecutor) {
+      this.downloadExecutorSupplier = downloadExecutor;
+      return this;
+    }
+
+    /**
+     * Sets whether to load only the tracks selected by the track selection policy.
+     *
+     * @param loadOnlySelectedTracks Whether to load only the tracks selected by the track selection
+     *     policy, instead of loading all tracks.
+     * @return This factory, for convenience.
+     */
+    @CanIgnoreReturnValue
+    public Factory setLoadOnlySelectedTracks(boolean loadOnlySelectedTracks) {
+      this.loadOnlySelectedTracks = loadOnlySelectedTracks;
       return this;
     }
 
@@ -281,6 +302,7 @@ public final class ProgressiveMediaSource extends BaseMediaSource
           drmSessionManagerProvider.get(mediaItem),
           loadErrorHandlingPolicy,
           continueLoadingCheckIntervalBytes,
+          loadOnlySelectedTracks,
           singleTrackId,
           singleTrackFormat,
           downloadExecutorSupplier);
@@ -293,7 +315,7 @@ public final class ProgressiveMediaSource extends BaseMediaSource
   }
 
   /**
-   * The default number of bytes that should be loaded between each each invocation of {@link
+   * The default number of bytes that should be loaded between each invocation of {@link
    * MediaPeriod.Callback#onContinueLoadingRequested(SequenceableLoader)}.
    */
   public static final int DEFAULT_LOADING_CHECK_INTERVAL_BYTES = 1024 * 1024;
@@ -303,6 +325,7 @@ public final class ProgressiveMediaSource extends BaseMediaSource
   private final DrmSessionManager drmSessionManager;
   private final LoadErrorHandlingPolicy loadableLoadErrorHandlingPolicy;
   private final int continueLoadingCheckIntervalBytes;
+  private final boolean loadOnlySelectedTracks;
 
   /**
    * The ID passed to {@link Factory#enableLazyLoadingWithSingleTrack(int, Format)}. Only valid if
@@ -322,6 +345,7 @@ public final class ProgressiveMediaSource extends BaseMediaSource
   private long timelineDurationUs;
   private boolean timelineIsSeekable;
   private boolean timelineIsLive;
+  private boolean hasSeenNonEstimatedSeekMap;
   @Nullable private TransferListener transferListener;
 
   @GuardedBy("this")
@@ -336,6 +360,7 @@ public final class ProgressiveMediaSource extends BaseMediaSource
       DrmSessionManager drmSessionManager,
       LoadErrorHandlingPolicy loadableLoadErrorHandlingPolicy,
       int continueLoadingCheckIntervalBytes,
+      boolean loadOnlySelectedTracks,
       int singleTrackId,
       @Nullable Format singleTrackFormat,
       @Nullable Supplier<ReleasableExecutor> downloadExecutorSupplier) {
@@ -345,6 +370,7 @@ public final class ProgressiveMediaSource extends BaseMediaSource
     this.drmSessionManager = drmSessionManager;
     this.loadableLoadErrorHandlingPolicy = loadableLoadErrorHandlingPolicy;
     this.continueLoadingCheckIntervalBytes = continueLoadingCheckIntervalBytes;
+    this.loadOnlySelectedTracks = loadOnlySelectedTracks;
     this.singleTrackFormat = singleTrackFormat;
     this.singleTrackId = singleTrackId;
     this.timelineIsPlaceholder = true;
@@ -405,6 +431,7 @@ public final class ProgressiveMediaSource extends BaseMediaSource
         allocator,
         localConfiguration.customCacheKey,
         continueLoadingCheckIntervalBytes,
+        loadOnlySelectedTracks,
         singleTrackId,
         singleTrackFormat,
         Util.msToUs(localConfiguration.imageDurationMs),
@@ -443,6 +470,12 @@ public final class ProgressiveMediaSource extends BaseMediaSource
 
   @Override
   public void onSourceInfoRefreshed(long durationUs, SeekMap seekMap, boolean isLive) {
+    if (hasSeenNonEstimatedSeekMap && seekMap.isEstimated()) {
+      // If we've seen a non-estimated seekMap and the new seekMap is estimated, then we are
+      // receiving the out-of-date source info from the period, and we should suppress it.
+      return;
+    }
+    hasSeenNonEstimatedSeekMap = !seekMap.isEstimated();
     // If we already have the duration from a previous source info refresh, use it.
     durationUs = durationUs == C.TIME_UNSET ? timelineDurationUs : durationUs;
     boolean isSeekable = seekMap.isSeekable();

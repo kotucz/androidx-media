@@ -30,6 +30,7 @@ import android.support.v4.media.session.PlaybackStateCompat;
 import androidx.annotation.Nullable;
 import androidx.media3.session.MediaLibraryService.MediaLibrarySession;
 import androidx.media3.test.session.common.HandlerThreadTestRule;
+import androidx.media3.test.session.common.MediaSessionConstants;
 import androidx.media3.test.session.common.TestHandler;
 import androidx.test.core.app.ApplicationProvider;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -52,6 +53,7 @@ import org.junit.runner.RunWith;
 /** Tests for {@link MediaBrowserCompat} with {@link MediaSessionService}. */
 @RunWith(AndroidJUnit4.class)
 @LargeTest
+@SuppressWarnings("deprecation") // Tests behavior of deprecated MediaBrowserCompat
 public class MediaBrowserCompatWithMediaSessionServiceTest {
 
   private final HandlerThreadTestRule threadTestRule =
@@ -150,10 +152,20 @@ public class MediaBrowserCompatWithMediaSessionServiceTest {
     assertThat(connectionCallback.failedLatch.getCount()).isNotEqualTo(0);
   }
 
-  @Ignore
+  @Test
+  public void getRoot_connectionAsync() throws Exception {
+    Bundle rootHints = new Bundle();
+    rootHints.putLong(MediaSessionConstants.CONNECTION_HINT_KEY_ASYNC_CONNECTION_DELAY_MS, 200L);
+    rootHints.putString(MediaSessionConstants.KEY_CONTROLLER, "getRoot_connectionAsync");
+
+    connectAndWait(rootHints);
+
+    assertThat(connectionCallback.connectedLatch.await(TIMEOUT_MS, MILLISECONDS)).isTrue();
+  }
+
+  @Ignore("Create a session service whose onConnect() returns null.")
   @Test
   public void connect_rejected() throws InterruptedException {
-    // TODO: Connect the browser to the session service whose onConnect() returns null.
     assertThat(connectionCallback.failedLatch.await(TIMEOUT_MS, MILLISECONDS)).isTrue();
     assertThat(connectionCallback.connectedLatch.getCount()).isNotEqualTo(0);
   }

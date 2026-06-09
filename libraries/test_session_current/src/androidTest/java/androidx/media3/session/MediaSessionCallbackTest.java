@@ -26,6 +26,8 @@ import static androidx.media3.test.session.common.CommonConstants.SUPPORT_APP_PA
 import static androidx.media3.test.session.common.TestUtils.NO_RESPONSE_TIMEOUT_MS;
 import static androidx.media3.test.session.common.TestUtils.TIMEOUT_MS;
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.util.concurrent.Futures.immediateFailedFuture;
+import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.junit.Assert.fail;
 
@@ -39,10 +41,13 @@ import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaLibraryInfo;
 import androidx.media3.common.Player;
+import androidx.media3.common.Player.Events;
+import androidx.media3.common.Player.Listener;
 import androidx.media3.common.Rating;
 import androidx.media3.common.StarRating;
 import androidx.media3.common.util.ConditionVariable;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.session.MediaSession.ConnectionResult;
 import androidx.media3.session.MediaSession.ConnectionResult.AcceptedResultBuilder;
 import androidx.media3.session.MediaSession.ControllerInfo;
 import androidx.media3.test.session.common.HandlerThreadTestRule;
@@ -56,7 +61,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.filters.LargeTest;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
-import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
@@ -64,6 +68,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.After;
@@ -122,12 +127,13 @@ public class MediaSessionCallbackTest {
   }
 
   @Test
-  public void onConnect_correctControllerVersions() throws Exception {
+  public void onConnect_deprecatedSync_providesBackwardsCompatibility() throws Exception {
     CountDownLatch latch = new CountDownLatch(1);
     final AtomicInteger controllerVersion = new AtomicInteger();
     final AtomicInteger controllerInterfaceVersion = new AtomicInteger();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
+          @SuppressWarnings("NullableProblems") // Testing backwards compatibility
           @Override
           public MediaSession.ConnectionResult onConnect(
               MediaSession session, ControllerInfo controller) {
@@ -138,24 +144,101 @@ public class MediaSessionCallbackTest {
                 new SessionCommands.Builder().addAllSessionCommands().build(),
                 new Player.Commands.Builder().addAllCommands().build());
           }
+
+          @Override
+          public ListenableFuture<ConnectionResult> onConnectAsync(
+              MediaSession session, ControllerInfo controller) {
+            // Ignored because the deprecated version has precedence.
+            return immediateFuture(ConnectionResult.reject());
+          }
         };
     MediaSession session =
         sessionTestRule.ensureReleaseAfterTest(
             new MediaSession.Builder(context, player)
                 .setCallback(callback)
-                .setId("testOnConnect_correctControllerVersions")
+                .setId("onConnect_deprecatedSync_providesBackwardsCompatibility")
+                .build());
+
+    RemoteMediaController remoteController =
+        remoteControllerTestRule.createRemoteController(session.getToken());
+    remoteController.play();
+
+    assertThat(latch.await(TIMEOUT_MS, MILLISECONDS)).isTrue();
+    assertThat(remoteController.getConnectedSessionToken()).isNotNull();
+    player.awaitMethodCalled(MockPlayer.METHOD_PLAY, TIMEOUT_MS);
+    assertThat(controllerVersion.get()).isEqualTo(MediaLibraryInfo.VERSION_INT);
+    assertThat(controllerInterfaceVersion.get()).isEqualTo(MediaLibraryInfo.INTERFACE_VERSION);
+  }
+
+  @Test
+  public void onConnectAsync_immediateFailedFuture() throws Exception {
+    CountDownLatch latch = new CountDownLatch(1);
+    final AtomicInteger controllerVersion = new AtomicInteger();
+    final AtomicInteger controllerInterfaceVersion = new AtomicInteger();
+    MediaSession.Callback callback =
+        new MediaSession.Callback() {
+          @Override
+          public ListenableFuture<MediaSession.ConnectionResult> onConnectAsync(
+              MediaSession session, ControllerInfo controller) {
+            controllerVersion.set(controller.getControllerVersion());
+            controllerInterfaceVersion.set(controller.getInterfaceVersion());
+            latch.countDown();
+            return immediateFailedFuture(new IllegalStateException());
+          }
+        };
+    MediaSession session =
+        sessionTestRule.ensureReleaseAfterTest(
+            new MediaSession.Builder(context, player)
+                .setCallback(callback)
+                .setId("onConnectAsync_immediateFailedFuture")
+                .build());
+
+    RemoteMediaController remoteController =
+        remoteControllerTestRule.createRemoteController(session.getToken());
+
+    assertThat(latch.await(TIMEOUT_MS, MILLISECONDS)).isTrue();
+    assertThat(remoteController.getConnectedSessionToken()).isNull();
+    assertThat(controllerVersion.get()).isEqualTo(MediaLibraryInfo.VERSION_INT);
+    assertThat(controllerInterfaceVersion.get()).isEqualTo(MediaLibraryInfo.INTERFACE_VERSION);
+  }
+
+  @Test
+  public void onConnectAsync_correctControllerVersions() throws Exception {
+    CountDownLatch latch = new CountDownLatch(1);
+    final AtomicInteger controllerVersion = new AtomicInteger();
+    final AtomicInteger controllerInterfaceVersion = new AtomicInteger();
+    MediaSession.Callback callback =
+        new MediaSession.Callback() {
+          @Override
+          public ListenableFuture<MediaSession.ConnectionResult> onConnectAsync(
+              MediaSession session, ControllerInfo controller) {
+            controllerVersion.set(controller.getControllerVersion());
+            controllerInterfaceVersion.set(controller.getInterfaceVersion());
+            latch.countDown();
+            return immediateFuture(
+                MediaSession.ConnectionResult.accept(
+                    new SessionCommands.Builder().addAllSessionCommands().build(),
+                    new Player.Commands.Builder().addAllCommands().build()));
+          }
+        };
+    MediaSession session =
+        sessionTestRule.ensureReleaseAfterTest(
+            new MediaSession.Builder(context, player)
+                .setCallback(callback)
+                .setId("onConnectAsync_correctControllerVersions")
                 .build());
 
     remoteControllerTestRule.createRemoteController(session.getToken());
 
     assertThat(latch.await(TIMEOUT_MS, MILLISECONDS)).isTrue();
     assertThat(controllerVersion.get()).isEqualTo(MediaLibraryInfo.VERSION_INT);
-    assertThat(controllerInterfaceVersion.get()).isEqualTo(MediaControllerStub.VERSION_INT);
+    assertThat(controllerInterfaceVersion.get()).isEqualTo(MediaLibraryInfo.INTERFACE_VERSION);
   }
 
   @Test
-  public void onConnect_setCustomLayoutWithMissingSessionCommand_buttonDisabledAndPermissionDenied()
-      throws Exception {
+  public void
+      onConnectAsync_setCustomLayoutWithMissingSessionCommand_buttonDisabledAndPermissionDenied()
+          throws Exception {
     CommandButton button1 =
         new CommandButton.Builder(CommandButton.ICON_PLAY)
             .setDisplayName("button1")
@@ -171,14 +254,16 @@ public class MediaSessionCallbackTest {
     MediaSession.Callback callback =
         new MediaSession.Callback() {
           @Override
-          public MediaSession.ConnectionResult onConnect(
+          public ListenableFuture<MediaSession.ConnectionResult> onConnectAsync(
               MediaSession session, ControllerInfo controller) {
-            return new AcceptedResultBuilder(session)
-                .setAvailableSessionCommands(
-                    new SessionCommands.Builder().add(button2.sessionCommand).build())
-                .setAvailablePlayerCommands(new Player.Commands.Builder().addAllCommands().build())
-                .setCustomLayout(ImmutableList.of(button1, button2))
-                .build();
+            return immediateFuture(
+                new AcceptedResultBuilder(session, controller)
+                    .setAvailableSessionCommands(
+                        new SessionCommands.Builder().add(button2.sessionCommand).build())
+                    .setAvailablePlayerCommands(
+                        new Player.Commands.Builder().addAllCommands().build())
+                    .setCustomLayout(ImmutableList.of(button1, button2))
+                    .build());
           }
 
           @Override
@@ -187,7 +272,7 @@ public class MediaSessionCallbackTest {
               ControllerInfo controller,
               SessionCommand customCommand,
               Bundle args) {
-            return Futures.immediateFuture(new SessionResult(RESULT_SUCCESS));
+            return immediateFuture(new SessionResult(RESULT_SUCCESS));
           }
         };
     MediaSession session =
@@ -207,7 +292,7 @@ public class MediaSessionCallbackTest {
 
   @Test
   public void
-      onConnect_setMediaButtonPreferencesWithMissingSessionCommand_buttonDisabledAndPermissionDenied()
+      onConnectAsync_setMediaButtonPreferencesWithMissingSessionCommand_buttonDisabledAndPermissionDenied()
           throws Exception {
     CommandButton button1 =
         new CommandButton.Builder(CommandButton.ICON_PLAY)
@@ -225,13 +310,14 @@ public class MediaSessionCallbackTest {
     MediaSession.Callback callback =
         new MediaSession.Callback() {
           @Override
-          public MediaSession.ConnectionResult onConnect(
+          public ListenableFuture<MediaSession.ConnectionResult> onConnectAsync(
               MediaSession session, ControllerInfo controller) {
-            return new AcceptedResultBuilder(session)
-                .setAvailableSessionCommands(
-                    new SessionCommands.Builder().add(button2.sessionCommand).build())
-                .setMediaButtonPreferences(ImmutableList.of(button1, button2))
-                .build();
+            return immediateFuture(
+                new AcceptedResultBuilder(session, controller)
+                    .setAvailableSessionCommands(
+                        new SessionCommands.Builder().add(button2.sessionCommand).build())
+                    .setMediaButtonPreferences(ImmutableList.of(button1, button2))
+                    .build());
           }
 
           @Override
@@ -240,7 +326,7 @@ public class MediaSessionCallbackTest {
               ControllerInfo controller,
               SessionCommand customCommand,
               Bundle args) {
-            return Futures.immediateFuture(new SessionResult(RESULT_SUCCESS));
+            return immediateFuture(new SessionResult(RESULT_SUCCESS));
           }
         };
     MediaSession session =
@@ -260,22 +346,23 @@ public class MediaSessionCallbackTest {
   }
 
   @Test
-  public void onConnect_emptyPlayerCommands_commandReleaseAlwaysIncluded() throws Exception {
+  public void onConnectAsync_emptyPlayerCommands_commandReleaseAlwaysIncluded() throws Exception {
     MediaSession.Callback callback =
         new MediaSession.Callback() {
           @Override
-          public MediaSession.ConnectionResult onConnect(
+          public ListenableFuture<MediaSession.ConnectionResult> onConnectAsync(
               MediaSession session, ControllerInfo controller) {
-            return new AcceptedResultBuilder(session)
-                .setAvailablePlayerCommands(Player.Commands.EMPTY)
-                .build();
+            return immediateFuture(
+                new AcceptedResultBuilder(session, controller)
+                    .setAvailablePlayerCommands(Player.Commands.EMPTY)
+                    .build());
           }
         };
     MediaSession session =
         sessionTestRule.ensureReleaseAfterTest(
             new MediaSession.Builder(context, player)
                 .setCallback(callback)
-                .setId("onConnect_emptyPlayerCommands_commandReleaseAlwaysIncluded")
+                .setId("onConnectAsync_emptyPlayerCommands_commandReleaseAlwaysIncluded")
                 .build());
     RemoteMediaController remoteController =
         remoteControllerTestRule.createRemoteController(session.getToken());
@@ -285,15 +372,16 @@ public class MediaSessionCallbackTest {
   }
 
   @Test
-  public void onConnect_connectionResultExtrasAreNull_usesSessionExtras() throws Exception {
+  public void onConnectAsync_connectionResultExtrasAreNull_usesSessionExtras() throws Exception {
     MediaSession.Callback callback =
         new MediaSession.Callback() {
           @Override
-          public MediaSession.ConnectionResult onConnect(
+          public ListenableFuture<MediaSession.ConnectionResult> onConnectAsync(
               MediaSession session, ControllerInfo controller) {
-            return new AcceptedResultBuilder(session)
-                .setAvailablePlayerCommands(Player.Commands.EMPTY)
-                .build();
+            return immediateFuture(
+                new AcceptedResultBuilder(session, controller)
+                    .setAvailablePlayerCommands(Player.Commands.EMPTY)
+                    .build());
           }
         };
     Bundle sessionExtras = new Bundle();
@@ -303,7 +391,7 @@ public class MediaSessionCallbackTest {
             new MediaSession.Builder(context, player)
                 .setSessionExtras(sessionExtras)
                 .setCallback(callback)
-                .setId("onConnect_connectionResultExtrasAreNull_usesGlobalSessionExtras")
+                .setId("onConnectAsync_connectionResultExtrasAreNull_usesGlobalSessionExtras")
                 .build());
 
     RemoteMediaController remoteController =
@@ -313,19 +401,20 @@ public class MediaSessionCallbackTest {
   }
 
   @Test
-  public void onConnect_connectionResultExtrasAreSet_usesControllerSpecificSessionExtras()
+  public void onConnectAsync_connectionResultExtrasAreSet_usesControllerSpecificSessionExtras()
       throws Exception {
     MediaSession.Callback callback =
         new MediaSession.Callback() {
           @Override
-          public MediaSession.ConnectionResult onConnect(
+          public ListenableFuture<MediaSession.ConnectionResult> onConnectAsync(
               MediaSession session, ControllerInfo controller) {
             Bundle sessionExtras = new Bundle();
             sessionExtras.putString("origin", "controller");
-            return new AcceptedResultBuilder(session)
-                .setSessionExtras(sessionExtras)
-                .setAvailablePlayerCommands(Player.Commands.EMPTY)
-                .build();
+            return immediateFuture(
+                new AcceptedResultBuilder(session, controller)
+                    .setSessionExtras(sessionExtras)
+                    .setAvailablePlayerCommands(Player.Commands.EMPTY)
+                    .build());
           }
         };
     Bundle sessionExtras = new Bundle();
@@ -335,7 +424,8 @@ public class MediaSessionCallbackTest {
             new MediaSession.Builder(context, player)
                 .setSessionExtras(sessionExtras)
                 .setCallback(callback)
-                .setId("onConnect_connectionResultExtrasAreSet_usesControllerSpecificSessionExtras")
+                .setId(
+                    "onConnectAsync_connectionResultExtrasAreSet_usesControllerSpecificSessionExtras")
                 .build());
 
     RemoteMediaController remoteController =
@@ -345,8 +435,9 @@ public class MediaSessionCallbackTest {
   }
 
   @Test
-  public void onConnect_connectionResultSessionActivitySet_usesControllerSpecificSessionActivity()
-      throws Exception {
+  public void
+      onConnectAsync_connectionResultSessionActivitySet_usesControllerSpecificSessionActivity()
+          throws Exception {
     Intent intent = new Intent(context, SurfaceActivity.class);
     PendingIntent controllerSpecificSessionActivity =
         PendingIntent.getActivity(
@@ -354,15 +445,15 @@ public class MediaSessionCallbackTest {
     MediaSession.Callback callback =
         new MediaSession.Callback() {
           @Override
-          public MediaSession.ConnectionResult onConnect(
+          public ListenableFuture<MediaSession.ConnectionResult> onConnectAsync(
               MediaSession session, ControllerInfo controller) {
             AcceptedResultBuilder connectionResult =
-                new AcceptedResultBuilder(session)
+                new AcceptedResultBuilder(session, controller)
                     .setAvailablePlayerCommands(Player.Commands.EMPTY);
             if (controller.getConnectionHints().getBoolean("want_session_activity", false)) {
               connectionResult.setSessionActivity(controllerSpecificSessionActivity);
             }
-            return connectionResult.build();
+            return immediateFuture(connectionResult.build());
           }
         };
     MediaSession session =
@@ -370,7 +461,7 @@ public class MediaSessionCallbackTest {
             new MediaSession.Builder(context, player)
                 .setCallback(callback)
                 .setId(
-                    "onConnect_connectionResultSessionActivitySet_usesControllerSpecificSessionActivity")
+                    "onConnectAsync_connectionResultSessionActivitySet_usesControllerSpecificSessionActivity")
                 .build());
     Bundle connectionHints = new Bundle();
     connectionHints.putBoolean("want_session_activity", true);
@@ -388,11 +479,11 @@ public class MediaSessionCallbackTest {
   }
 
   @Test
-  public void onConnect_connectionResultDefault_emptySessionExtras() throws Exception {
+  public void onConnectAsync_connectionResultDefault_emptySessionExtras() throws Exception {
     MediaSession session =
         sessionTestRule.ensureReleaseAfterTest(
             new MediaSession.Builder(context, player)
-                .setId("onConnect_connectionResultDefault_emptySessionExtras")
+                .setId("onConnectAsync_connectionResultDefault_emptySessionExtras")
                 .build());
 
     RemoteMediaController remoteController =
@@ -402,7 +493,7 @@ public class MediaSessionCallbackTest {
   }
 
   @Test
-  public void onConnect_withMaxCommandsForMediaItems_correctMaxLimitInControllerInfo()
+  public void onConnectAsync_withMaxCommandsForMediaItems_correctMaxLimitInControllerInfo()
       throws Exception {
     CountDownLatch latch = new CountDownLatch(/* count= */ 1);
     AtomicInteger maxCommandsForMediaItems = new AtomicInteger();
@@ -412,14 +503,14 @@ public class MediaSessionCallbackTest {
                 .setCallback(
                     new MediaSession.Callback() {
                       @Override
-                      public MediaSession.ConnectionResult onConnect(
+                      public ListenableFuture<MediaSession.ConnectionResult> onConnectAsync(
                           MediaSession session, ControllerInfo controller) {
                         maxCommandsForMediaItems.set(controller.getMaxCommandsForMediaItems());
                         latch.countDown();
-                        return MediaSession.Callback.super.onConnect(session, controller);
+                        return MediaSession.Callback.super.onConnectAsync(session, controller);
                       }
                     })
-                .setId("onConnect_withMaxCommandForMediaItems_correctMaxLimitInControllerInfo")
+                .setId("onConnectAsync_withMaxCommandForMediaItems_correctMaxLimitInControllerInfo")
                 .build());
     Bundle connectionHints = new Bundle();
     connectionHints.putInt(
@@ -453,14 +544,14 @@ public class MediaSessionCallbackTest {
   }
 
   @Test
-  public void onPostConnect_afterConnectionRejected() throws Exception {
+  public void onPostConnect_afterConnectionRejectedForTrustedApp() throws Exception {
     CountDownLatch latch = new CountDownLatch(1);
     MediaSession.Callback callback =
         new MediaSession.Callback() {
           @Override
-          public MediaSession.ConnectionResult onConnect(
+          public ListenableFuture<MediaSession.ConnectionResult> onConnectAsync(
               MediaSession session, ControllerInfo controller) {
-            return MediaSession.ConnectionResult.reject();
+            return immediateFuture(MediaSession.ConnectionResult.reject());
           }
 
           @Override
@@ -475,12 +566,13 @@ public class MediaSessionCallbackTest {
                 .setId("testOnPostConnect_afterConnectionRejected")
                 .build());
     remoteControllerTestRule.createRemoteController(session.getToken());
-    assertThat(latch.await(NO_RESPONSE_TIMEOUT_MS, MILLISECONDS)).isFalse();
+    assertThat(latch.await(TIMEOUT_MS, MILLISECONDS)).isTrue();
   }
 
   @Test
   public void onCommandRequest() throws Exception {
-    ArrayList<Integer> commands = new ArrayList<>();
+    CountDownLatch prepareLatch = new CountDownLatch(1);
+    List<Integer> commands = new ArrayList<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
           @Override
@@ -491,9 +583,9 @@ public class MediaSessionCallbackTest {
               return RESULT_INFO_SKIPPED;
             }
 
-            assertThat(controllerInfo.isTrusted()).isFalse();
             commands.add(command);
             if (command == Player.COMMAND_PREPARE) {
+              prepareLatch.countDown();
               return ERROR_INVALID_STATE;
             }
             return RESULT_SUCCESS;
@@ -510,7 +602,7 @@ public class MediaSessionCallbackTest {
         remoteControllerTestRule.createRemoteController(session.getToken());
 
     controller.prepare();
-    Thread.sleep(NO_RESPONSE_TIMEOUT_MS);
+    assertThat(prepareLatch.await(TIMEOUT_MS, MILLISECONDS)).isTrue();
     assertThat(player.hasMethodBeenCalled(MockPlayer.METHOD_PREPARE)).isFalse();
     assertThat(commands).hasSize(1);
     assertThat(commands.get(0)).isEqualTo(Player.COMMAND_PREPARE);
@@ -538,11 +630,12 @@ public class MediaSessionCallbackTest {
     MediaSession.Callback callback =
         new MediaSession.Callback() {
           @Override
-          public MediaSession.ConnectionResult onConnect(
+          public ListenableFuture<MediaSession.ConnectionResult> onConnectAsync(
               MediaSession session, ControllerInfo controller) {
             SessionCommands sessionCommands =
                 new SessionCommands.Builder().addAllPredefinedCommands().add(testCommand).build();
-            return MediaSession.ConnectionResult.accept(sessionCommands, Player.Commands.EMPTY);
+            return immediateFuture(
+                MediaSession.ConnectionResult.accept(sessionCommands, Player.Commands.EMPTY));
           }
 
           @Override
@@ -552,13 +645,13 @@ public class MediaSessionCallbackTest {
               SessionCommand sessionCommand,
               Bundle args) {
             if (!TextUtils.equals(controller.getPackageName(), SUPPORT_APP_PACKAGE_NAME)) {
-              return Futures.immediateFuture(new SessionResult(RESULT_INFO_SKIPPED));
+              return immediateFuture(new SessionResult(SessionError.INFO_CANCELLED));
             }
 
             sessionCommandRef.set(sessionCommand);
             argsRef.set(args);
             latch.countDown();
-            return Futures.immediateFuture(new SessionResult(RESULT_SUCCESS));
+            return immediateFuture(new SessionResult(RESULT_SUCCESS));
           }
         };
 
@@ -592,13 +685,13 @@ public class MediaSessionCallbackTest {
           public ListenableFuture<SessionResult> onSetRating(
               MediaSession session, ControllerInfo controller, String mediaId, Rating rating) {
             if (!TextUtils.equals(controller.getPackageName(), SUPPORT_APP_PACKAGE_NAME)) {
-              return Futures.immediateFuture(new SessionResult(RESULT_INFO_SKIPPED));
+              return immediateFuture(new SessionResult(SessionError.INFO_CANCELLED));
             }
 
             mediaIdRef.set(mediaId);
             ratingRef.set(rating);
             latch.countDown();
-            return Futures.immediateFuture(new SessionResult(RESULT_SUCCESS));
+            return immediateFuture(new SessionResult(RESULT_SUCCESS));
           }
         };
 
@@ -630,11 +723,11 @@ public class MediaSessionCallbackTest {
           public ListenableFuture<SessionResult> onSetRating(
               MediaSession session, ControllerInfo controller, Rating rating) {
             if (!TextUtils.equals(controller.getPackageName(), SUPPORT_APP_PACKAGE_NAME)) {
-              return Futures.immediateFuture(new SessionResult(RESULT_INFO_SKIPPED));
+              return immediateFuture(new SessionResult(SessionError.INFO_CANCELLED));
             }
             ratingRef.set(rating);
             latch.countDown();
-            return Futures.immediateFuture(new SessionResult(RESULT_SUCCESS));
+            return immediateFuture(new SessionResult(RESULT_SUCCESS));
           }
         };
 
@@ -654,7 +747,7 @@ public class MediaSessionCallbackTest {
 
   @Test
   public void onAddMediaItems_withSetMediaItem() throws Exception {
-    MediaItem mediaItem = createMediaItem("mediaId");
+    MediaItem mediaItem = createMediaItem("mediaId", /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -683,7 +776,8 @@ public class MediaSessionCallbackTest {
   public void
       onAddMediaItemsDefault_withSetMediaItemIncludeLocalConfiguration_mediaItemDoesntContainLocalConfiguration_noItemsSet()
           throws Exception {
-    MediaItem mediaItemWithoutLocalConfiguration = createMediaItem("mediaId");
+    MediaItem mediaItemWithoutLocalConfiguration =
+        createMediaItem("mediaId", /* buildWithUri= */ false);
     MediaSession session =
         sessionTestRule.ensureReleaseAfterTest(new MediaSession.Builder(context, player).build());
     RemoteMediaController controller =
@@ -702,8 +796,10 @@ public class MediaSessionCallbackTest {
   public void
       onAddMediaItemsDefault_withSetMediaItemsIncludeLocalConfiguration_mediaItemsDontContainLocalConfiguration_noItemsSet()
           throws Exception {
-    MediaItem mediaItemWithoutLocalConfiguration1 = createMediaItem("mediaId1");
-    MediaItem mediaItemWithoutLocalConfiguration2 = createMediaItem("mediaId2");
+    MediaItem mediaItemWithoutLocalConfiguration1 =
+        createMediaItem("mediaId1", /* buildWithUri= */ false);
+    MediaItem mediaItemWithoutLocalConfiguration2 =
+        createMediaItem("mediaId2", /* buildWithUri= */ false);
     List<MediaItem> mediaItemsWithoutLocalConfiguration =
         ImmutableList.of(mediaItemWithoutLocalConfiguration1, mediaItemWithoutLocalConfiguration2);
     MediaSession session =
@@ -724,7 +820,7 @@ public class MediaSessionCallbackTest {
   public void
       onAddMediaItemsDefault_withSetMediaItemIncludeLocalConfiguration_mediaItemContainsLocalConfiguration_itemSet()
           throws Exception {
-    MediaItem mediaItem = createMediaItem("mediaId");
+    MediaItem mediaItem = createMediaItem("mediaId", /* buildWithUri= */ true);
     MediaItem mediaItemWithLocalConfiguration = updateMediaItemWithLocalConfiguration(mediaItem);
     MediaSession session =
         sessionTestRule.ensureReleaseAfterTest(new MediaSession.Builder(context, player).build());
@@ -742,8 +838,8 @@ public class MediaSessionCallbackTest {
   public void
       onAddMediaItemsDefault_withSetMediaItemsIncludeLocalConfiguration_mediaItemsContainLocalConfiguration_itemsSet()
           throws Exception {
-    MediaItem mediaItem1 = createMediaItem("mediaId1");
-    MediaItem mediaItem2 = createMediaItem("mediaId2");
+    MediaItem mediaItem1 = createMediaItem("mediaId1", /* buildWithUri= */ true);
+    MediaItem mediaItem2 = createMediaItem("mediaId2", /* buildWithUri= */ true);
     List<MediaItem> fullMediaItems =
         updateMediaItemsWithLocalConfiguration(ImmutableList.of(mediaItem1, mediaItem2));
     MediaSession session =
@@ -760,7 +856,7 @@ public class MediaSessionCallbackTest {
 
   @Test
   public void onAddMediaItems_withSetMediaItemWithStartPosition() throws Exception {
-    MediaItem mediaItem = createMediaItem("mediaId");
+    MediaItem mediaItem = createMediaItem("mediaId", /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -789,7 +885,7 @@ public class MediaSessionCallbackTest {
 
   @Test
   public void onAddMediaItems_withSetMediaItemWithResetPosition() throws Exception {
-    MediaItem mediaItem = createMediaItem("mediaId");
+    MediaItem mediaItem = createMediaItem("mediaId", /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -817,7 +913,8 @@ public class MediaSessionCallbackTest {
 
   @Test
   public void onAddMediaItems_withSetMediaItems() throws Exception {
-    List<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
+    List<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -846,7 +943,8 @@ public class MediaSessionCallbackTest {
 
   @Test
   public void onAddMediaItems_withSetMediaItemsWithStartIndex() throws Exception {
-    List<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
+    List<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -877,7 +975,8 @@ public class MediaSessionCallbackTest {
 
   @Test
   public void onAddMediaItems_withSetMediaItemsWithResetPosition() throws Exception {
-    List<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
+    List<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -907,7 +1006,7 @@ public class MediaSessionCallbackTest {
 
   @Test
   public void onAddMediaItems_withAddMediaItem() throws Exception {
-    MediaItem mediaItem = createMediaItem("mediaId");
+    MediaItem mediaItem = createMediaItem("mediaId", /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -936,7 +1035,8 @@ public class MediaSessionCallbackTest {
   public void
       onAddMediaItems_withAddMediaItemIncludeLocalConfiguration_mediaItemDoesntContainLocalConfiguration_noItemsAdded()
           throws Exception {
-    MediaItem mediaItemWithoutLocalConfiguration = createMediaItem("mediaId");
+    MediaItem mediaItemWithoutLocalConfiguration =
+        createMediaItem("mediaId", /* buildWithUri= */ false);
     MediaSession session =
         sessionTestRule.ensureReleaseAfterTest(new MediaSession.Builder(context, player).build());
     RemoteMediaController controller =
@@ -954,8 +1054,10 @@ public class MediaSessionCallbackTest {
   public void
       onAddMediaItems_withAddMediaItemsIncludeLocalConfiguration_mediaItemsDontContainLocalConfiguration_noItemsAdded()
           throws Exception {
-    MediaItem mediaItemWithoutLocalConfiguration1 = createMediaItem("mediaId1");
-    MediaItem mediaItemWithoutLocalConfiguration2 = createMediaItem("mediaId2");
+    MediaItem mediaItemWithoutLocalConfiguration1 =
+        createMediaItem("mediaId1", /* buildWithUri= */ false);
+    MediaItem mediaItemWithoutLocalConfiguration2 =
+        createMediaItem("mediaId2", /* buildWithUri= */ false);
     List<MediaItem> mediaItemsWithoutLocalConfiguration =
         ImmutableList.of(mediaItemWithoutLocalConfiguration1, mediaItemWithoutLocalConfiguration2);
     MediaSession session =
@@ -975,7 +1077,7 @@ public class MediaSessionCallbackTest {
   public void
       onAddMediaItems_withAddMediaItemIncludeLocalConfiguration_mediaItemContainsLocalConfiguration_itemAdded()
           throws Exception {
-    MediaItem mediaItem = createMediaItem("mediaId");
+    MediaItem mediaItem = createMediaItem("mediaId", /* buildWithUri= */ true);
     MediaItem mediaItemWithLocalConfiguration = updateMediaItemWithLocalConfiguration(mediaItem);
     MediaSession session =
         sessionTestRule.ensureReleaseAfterTest(new MediaSession.Builder(context, player).build());
@@ -993,8 +1095,8 @@ public class MediaSessionCallbackTest {
   public void
       onAddMediaItems_withAddMediaItemsIncludeLocalConfiguration_mediaItemsContainLocalConfiguration_itemsAdded()
           throws Exception {
-    MediaItem mediaItem1 = createMediaItem("mediaId1");
-    MediaItem mediaItem2 = createMediaItem("mediaId2");
+    MediaItem mediaItem1 = createMediaItem("mediaId1", /* buildWithUri= */ true);
+    MediaItem mediaItem2 = createMediaItem("mediaId2", /* buildWithUri= */ true);
     List<MediaItem> fullMediaItems =
         updateMediaItemsWithLocalConfiguration(ImmutableList.of(mediaItem1, mediaItem2));
     MediaSession session =
@@ -1011,8 +1113,8 @@ public class MediaSessionCallbackTest {
 
   @Test
   public void onAddMediaItems_withAddMediaItemWithIndex() throws Exception {
-    MediaItem existingItem = createMediaItem("existingItem");
-    MediaItem mediaItem = createMediaItem("mediaId");
+    MediaItem existingItem = createMediaItem("existingItem", /* buildWithUri= */ true);
+    MediaItem mediaItem = createMediaItem("mediaId", /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -1044,7 +1146,8 @@ public class MediaSessionCallbackTest {
 
   @Test
   public void onAddMediaItems_withAddMediaItems() throws Exception {
-    List<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
+    List<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -1073,8 +1176,9 @@ public class MediaSessionCallbackTest {
 
   @Test
   public void onAddMediaItems_withAddMediaItemsWithIndex() throws Exception {
-    MediaItem existingItem = createMediaItem("existingItem");
-    List<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
+    MediaItem existingItem = createMediaItem("existingItem", true);
+    List<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -1109,7 +1213,7 @@ public class MediaSessionCallbackTest {
   @Test
   public void onSetMediaItems_withSetMediaItemWithStartPosition_callsPlayerWithStartIndex()
       throws Exception {
-    MediaItem mediaItem = createMediaItem("mediaId");
+    MediaItem mediaItem = createMediaItem("mediaId", /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -1122,7 +1226,7 @@ public class MediaSessionCallbackTest {
               long startPositionMs) {
             requestedMediaItems.set(mediaItems);
 
-            return Futures.immediateFuture(
+            return immediateFuture(
                 new MediaSession.MediaItemsWithStartPosition(
                     updateMediaItemsWithLocalConfiguration(mediaItems),
                     startIndex,
@@ -1147,7 +1251,8 @@ public class MediaSessionCallbackTest {
   @Test
   public void onSetMediaItems_withSetMediaItemsWithStartIndex_callsPlayerWithStartIndex()
       throws Exception {
-    List<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
+    List<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -1160,7 +1265,7 @@ public class MediaSessionCallbackTest {
               long startPositionMs) {
             requestedMediaItems.set(mediaItems);
 
-            return Futures.immediateFuture(
+            return immediateFuture(
                 new MediaSession.MediaItemsWithStartPosition(
                     updateMediaItemsWithLocalConfiguration(mediaItems),
                     startIndex,
@@ -1187,7 +1292,8 @@ public class MediaSessionCallbackTest {
   @Test
   public void onSetMediaItems_withIndexPositionUnset_callsPlayerWithResetPosition()
       throws Exception {
-    List<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
+    List<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -1200,7 +1306,7 @@ public class MediaSessionCallbackTest {
               long startPositionMs) {
             requestedMediaItems.set(mediaItems);
 
-            return Futures.immediateFuture(
+            return immediateFuture(
                 new MediaSession.MediaItemsWithStartPosition(
                     updateMediaItemsWithLocalConfiguration(mediaItems),
                     C.INDEX_UNSET,
@@ -1226,7 +1332,8 @@ public class MediaSessionCallbackTest {
   @Test
   public void onSetMediaItems_withStartIndexUnset_callsPlayerWithCurrentIndexAndPosition()
       throws Exception {
-    List<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
+    List<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true);
     AtomicReference<List<MediaItem>> requestedMediaItems = new AtomicReference<>();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
@@ -1239,7 +1346,7 @@ public class MediaSessionCallbackTest {
               long startPositionMs) {
             requestedMediaItems.set(mediaItems);
 
-            return Futures.immediateFuture(
+            return immediateFuture(
                 new MediaSession.MediaItemsWithStartPosition(
                     updateMediaItemsWithLocalConfiguration(mediaItems),
                     startIndex,
@@ -1256,6 +1363,7 @@ public class MediaSessionCallbackTest {
 
     // Model that player played to next item. Current media item index and position have changed
     player.currentMediaItemIndex = 1;
+    player.currentPeriodIndex = 1;
     player.currentPosition = 200;
 
     // Re-set media items with start index and position as current index and position
@@ -1263,22 +1371,24 @@ public class MediaSessionCallbackTest {
     player.awaitMethodCalled(MockPlayer.METHOD_SET_MEDIA_ITEMS_WITH_START_INDEX, TIMEOUT_MS);
 
     assertThat(requestedMediaItems.get()).containsExactlyElementsIn(mediaItems).inOrder();
-    assertThat(player.mediaItems)
-        .containsExactlyElementsIn(updateMediaItemsWithLocalConfiguration(mediaItems))
-        .inOrder();
+    assertThat(player.mediaItems).containsExactlyElementsIn(mediaItems).inOrder();
     assertThat(player.startMediaItemIndex).isEqualTo(1);
     assertThat(player.startPositionMs).isEqualTo(200);
   }
 
   @Test
-  public void onPlay_withEmptyTimeline_callsOnGetPlaybackResumptionPlaylist() throws Exception {
-    List<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
+  public void onPlay_withEmptyTimeline_callsOnGetPlaybackResumptionWithForPlaybackTrue()
+      throws Exception {
+    List<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true);
+    AtomicBoolean isForPlaybackParameter = new AtomicBoolean();
     MediaSession.Callback callback =
         new MediaSession.Callback() {
           @Override
           public ListenableFuture<MediaSession.MediaItemsWithStartPosition> onPlaybackResumption(
-              MediaSession mediaSession, ControllerInfo controller) {
-            return Futures.immediateFuture(
+              MediaSession mediaSession, ControllerInfo controller, boolean isForPlayback) {
+            isForPlaybackParameter.set(isForPlayback);
+            return immediateFuture(
                 new MediaSession.MediaItemsWithStartPosition(
                     mediaItems, /* startIndex= */ 1, /* startPositionMs= */ 123L));
           }
@@ -1298,6 +1408,7 @@ public class MediaSessionCallbackTest {
     assertThat(player.startMediaItemIndex).isEqualTo(1);
     assertThat(player.startPositionMs).isEqualTo(123L);
     assertThat(player.mediaItems).isEqualTo(mediaItems);
+    assertThat(isForPlaybackParameter.get()).isTrue();
   }
 
   @Test
@@ -1354,13 +1465,14 @@ public class MediaSessionCallbackTest {
             .addAllCommands()
             .remove(Player.COMMAND_CHANGE_MEDIA_ITEMS)
             .build();
-    List<MediaItem> mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
+    List<MediaItem> mediaItems =
+        MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true);
     MediaSession.Callback callback =
         new MediaSession.Callback() {
           @Override
           public ListenableFuture<MediaSession.MediaItemsWithStartPosition> onPlaybackResumption(
-              MediaSession mediaSession, ControllerInfo controller) {
-            return Futures.immediateFuture(
+              MediaSession mediaSession, ControllerInfo controller, boolean isForPlayback) {
+            return immediateFuture(
                 new MediaSession.MediaItemsWithStartPosition(
                     mediaItems, /* startIndex= */ 1, /* startPositionMs= */ 123L));
           }
@@ -1392,8 +1504,8 @@ public class MediaSessionCallbackTest {
         new MediaSession.Callback() {
           @Override
           public ListenableFuture<MediaSession.MediaItemsWithStartPosition> onPlaybackResumption(
-              MediaSession mediaSession, ControllerInfo controller) {
-            return Futures.immediateFailedFuture(new UnsupportedOperationException());
+              MediaSession mediaSession, ControllerInfo controller, boolean isForPlayback) {
+            return immediateFailedFuture(new UnsupportedOperationException());
           }
         };
     MediaSession session =
@@ -1415,19 +1527,21 @@ public class MediaSessionCallbackTest {
 
   @Test
   public void onPlay_withNonEmptyTimeline_callsHandlePlayButtonAction() throws Exception {
-    player.timeline = new PlaylistTimeline(MediaTestUtils.createMediaItems(/* size= */ 3));
-    player.mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3);
+    player.timeline =
+        new PlaylistTimeline(
+            MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true));
+    player.mediaItems = MediaTestUtils.createMediaItems(/* size= */ 3, /* buildWithUri= */ true);
     player.startMediaItemIndex = 1;
     player.startPositionMs = 321L;
     MediaSession.Callback callback =
         new MediaSession.Callback() {
           @Override
           public ListenableFuture<MediaSession.MediaItemsWithStartPosition> onPlaybackResumption(
-              MediaSession mediaSession, ControllerInfo controller) {
+              MediaSession mediaSession, ControllerInfo controller, boolean isForPlayback) {
             fail();
-            return Futures.immediateFuture(
+            return immediateFuture(
                 new MediaSession.MediaItemsWithStartPosition(
-                    MediaTestUtils.createMediaItems(/* size= */ 10),
+                    MediaTestUtils.createMediaItems(/* size= */ 10, /* buildWithUri= */ true),
                     /* startIndex= */ 9,
                     /* startPositionMs= */ C.TIME_UNSET));
           }
@@ -1460,15 +1574,15 @@ public class MediaSessionCallbackTest {
                 .setCallback(
                     new MediaSession.Callback() {
                       @Override
-                      public MediaSession.ConnectionResult onConnect(
+                      public ListenableFuture<MediaSession.ConnectionResult> onConnectAsync(
                           MediaSession session, ControllerInfo controller) {
                         // TODO: Get uid of client app's and compare.
                         if (!SUPPORT_APP_PACKAGE_NAME.equals(controller.getPackageName())) {
-                          return MediaSession.ConnectionResult.reject();
+                          return immediateFuture(MediaSession.ConnectionResult.reject());
                         }
                         connectionHints.set(controller.getConnectionHints());
                         latch.countDown();
-                        return MediaSession.Callback.super.onConnect(session, controller);
+                        return MediaSession.Callback.super.onConnectAsync(session, controller);
                       }
                     })
                 .build());
@@ -1511,7 +1625,7 @@ public class MediaSessionCallbackTest {
 
   @Test
   public void
-      seekToNextMediaItem_controllerListenerTriggeredByMasking_commandNotYetArrivedAtSession()
+      seekToNextMediaItem_controllerListenerTriggeredByMasking_playerAndControllerOutOfSyncDuringMasking()
           throws Exception {
     MediaItem mediaItem1 =
         new MediaItem.Builder().setMediaId("id1").setUri("http://www.example.com/1").build();
@@ -1528,15 +1642,20 @@ public class MediaSessionCallbackTest {
                 });
     List<MediaItem> currentMediaItemsOfPlayer = new ArrayList<>();
     AtomicReference<MediaController> controller = new AtomicReference<>();
-    List<String> eventOrder = new ArrayList<>();
-    CountDownLatch latch = new CountDownLatch(2);
-    // Listener added to player before the the session is built and the session adds a listener.
+    List<String> passiveControllerEvents = new ArrayList<>();
+    List<String> activeControllerEvents = new ArrayList<>();
+    CountDownLatch latch = new CountDownLatch(4);
+    // Listener added to player before the session is built and the session adds a listener.
     testPlayer.addListener(
         new Player.Listener() {
           @Override
           public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
             currentMediaItemsOfPlayer.add(testPlayer.getCurrentMediaItem());
-            eventOrder.add("player.onMediaItemTransition");
+            postToController(
+                () -> {
+                  passiveControllerEvents.add("player.onMediaItemTransition");
+                  activeControllerEvents.add("player.onMediaItemTransition");
+                });
           }
 
           @Override
@@ -1544,8 +1663,12 @@ public class MediaSessionCallbackTest {
             if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
               // Player still has the first item. Command has not yet arrived at the session.
               currentMediaItemsOfPlayer.add(testPlayer.getCurrentMediaItem());
-              eventOrder.add("player.onEvents");
-              latch.countDown();
+              postToController(
+                  () -> {
+                    passiveControllerEvents.add("player.onEvents");
+                    activeControllerEvents.add("player.onEvents");
+                    latch.countDown();
+                  });
             }
           }
         });
@@ -1555,6 +1678,24 @@ public class MediaSessionCallbackTest {
                 .setId(
                     "listener_controllerListenerTriggeredByMasking_commandNotYetArrivedAtSession")
                 .build());
+    MediaController passiveController = controllerTestRule.createController(session.getToken());
+    passiveController.addListener(
+        new Listener() {
+
+          @Override
+          public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
+            passiveControllerEvents.add("controller.onMediaItemTransition");
+            latch.countDown();
+          }
+
+          @Override
+          public void onEvents(Player player, Events events) {
+            if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
+              passiveControllerEvents.add("controller.onEvents");
+              latch.countDown();
+            }
+          }
+        });
     controller.set(controllerTestRule.createController(session.getToken()));
     controller
         .get()
@@ -1562,9 +1703,8 @@ public class MediaSessionCallbackTest {
             /* listener= */ new Player.Listener() {
               @Override
               public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
-                eventOrder.add("controller.onMediaItemTransition");
-                postToPlayerAndSync(
-                    () -> currentMediaItemsOfPlayer.add(testPlayer.getCurrentMediaItem()));
+                activeControllerEvents.add("controller.onMediaItemTransition");
+                postToPlayer(() -> currentMediaItemsOfPlayer.add(testPlayer.getCurrentMediaItem()));
               }
 
               @Override
@@ -1572,10 +1712,12 @@ public class MediaSessionCallbackTest {
                 if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
                   // Triggered by masking in the same looper iteration as where
                   // controller.seekToNextMediaItem() is called.
-                  eventOrder.add("controller.onEvents");
-                  postToPlayerAndSync(
-                      () -> currentMediaItemsOfPlayer.add(testPlayer.getCurrentMediaItem()));
-                  latch.countDown();
+                  activeControllerEvents.add("controller.onEvents");
+                  postToPlayer(
+                      () -> {
+                        currentMediaItemsOfPlayer.add(testPlayer.getCurrentMediaItem());
+                        latch.countDown();
+                      });
                 }
               }
             });
@@ -1583,22 +1725,32 @@ public class MediaSessionCallbackTest {
     postToControllerAndSync(controller.get()::seekToNextMediaItem);
 
     assertThat(latch.await(TIMEOUT_MS, MILLISECONDS)).isTrue();
-    assertThat(currentMediaItemsOfPlayer)
-        .containsExactly(mediaItem1, mediaItem1, mediaItem2, mediaItem2)
-        .inOrder();
-    assertThat(eventOrder)
+    // player event first
+    assertThat(passiveControllerEvents.get(0)).isEqualTo("player.onMediaItemTransition");
+    assertThat(passiveControllerEvents)
+        .containsExactly(
+            "player.onMediaItemTransition",
+            "player.onEvents",
+            "controller.onMediaItemTransition",
+            "controller.onEvents"); // using inOrder makes test flaky
+    // controller event first (masking)
+    assertThat(activeControllerEvents.get(0)).isEqualTo("controller.onMediaItemTransition");
+    assertThat(activeControllerEvents)
         .containsExactly(
             "controller.onMediaItemTransition",
             "controller.onEvents",
             "player.onMediaItemTransition",
-            "player.onEvents")
+            "player.onEvents"); // using inOrder makes test flaky
+    assertThat(currentMediaItemsOfPlayer)
+        .containsExactly(mediaItem1, mediaItem1, mediaItem2, mediaItem2)
         .inOrder();
     postToControllerAndSync(() -> controller.get().release());
   }
 
   @Test
-  public void seekToNextMediaItem_playerListenerTriggeredByMasking_immediateCallHasStaleController()
-      throws Exception {
+  public void
+      seekToNextMediaItem_playerListenerTriggeredByMasking_immediateListenerCallUpdatesControllers()
+          throws Exception {
     MediaItem mediaItem1 =
         new MediaItem.Builder().setMediaId("id1").setUri("http://www.example.com/1").build();
     MediaItem mediaItem2 =
@@ -1612,30 +1764,22 @@ public class MediaSessionCallbackTest {
                   exoPlayer.setMediaItems(ImmutableList.of(mediaItem1, mediaItem2));
                   return exoPlayer;
                 });
-    List<String> currentMediaIdsOfController = new ArrayList<>();
-    List<String> eventOrder = new ArrayList<>();
+    List<String> activeControllerEvents = new ArrayList<>();
     CountDownLatch latch = new CountDownLatch(2);
     AtomicReference<MediaController> controller = new AtomicReference<>();
-    // Listener added to player before the the session is built and the session adds a listener.
+    // Listener added to player before the session is built and the session adds a listener.
     testPlayer.addListener(
         new Player.Listener() {
           @Override
           public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
             postToControllerAndSync(
-                () ->
-                    currentMediaIdsOfController.add(
-                        controller.get().getCurrentMediaItem().mediaId));
-            eventOrder.add("player.onMediaItemTransition");
+                () -> activeControllerEvents.add("player.onMediaItemTransition"));
           }
 
           @Override
           public void onEvents(Player player, Player.Events events) {
             if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
-              postToControllerAndSync(
-                  () ->
-                      currentMediaIdsOfController.add(
-                          controller.get().getCurrentMediaItem().mediaId));
-              eventOrder.add("player.onEvents");
+              postToControllerAndSync(() -> activeControllerEvents.add("player.onEvents"));
               latch.countDown();
             }
           }
@@ -1644,7 +1788,7 @@ public class MediaSessionCallbackTest {
         sessionTestRule.ensureReleaseAfterTest(
             new MediaSession.Builder(context, testPlayer)
                 .setId(
-                    "listener_playerListenerTriggeredByMasking_statusUpdateArrivedAtSameProcessController")
+                    "seekToNextMediaItem_playerListenerTriggeredByMasking_immediateCallHasStaleController")
                 .build());
     controller.set(controllerTestRule.createController(session.getToken()));
     controller
@@ -1653,15 +1797,13 @@ public class MediaSessionCallbackTest {
             new Player.Listener() {
               @Override
               public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
-                currentMediaIdsOfController.add(controller.get().getCurrentMediaItem().mediaId);
-                eventOrder.add("controller.onMediaItemTransition");
+                activeControllerEvents.add("controller.onMediaItemTransition");
               }
 
               @Override
               public void onEvents(Player player, Player.Events events) {
                 if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
-                  currentMediaIdsOfController.add(controller.get().getCurrentMediaItem().mediaId);
-                  eventOrder.add("controller.onEvents");
+                  activeControllerEvents.add("controller.onEvents");
                   latch.countDown();
                 }
               }
@@ -1670,14 +1812,136 @@ public class MediaSessionCallbackTest {
     postToPlayerAndSync(testPlayer::seekToNextMediaItem);
 
     assertThat(latch.await(TIMEOUT_MS, MILLISECONDS)).isTrue();
-    assertThat(currentMediaIdsOfController).containsExactly("id1", "id2", "id2", "id2").inOrder();
-    assertThat(eventOrder)
+    assertThat(activeControllerEvents.get(0)).isEqualTo("player.onMediaItemTransition");
+    assertThat(activeControllerEvents)
         .containsExactly(
             "player.onMediaItemTransition",
             "controller.onMediaItemTransition",
             "controller.onEvents",
-            "player.onEvents")
+            "player.onEvents");
+  }
+
+  @Test
+  public void
+      seekToNextMediaItemIndex_calledOnControllerForSameMediaItemAtBothIndices_onMediaItemTransitionCalled()
+          throws Exception {
+    MediaItem mediaItem =
+        new MediaItem.Builder().setMediaId("id1").setUri("http://www.example.com/1").build();
+    ExoPlayer testPlayer =
+        playerThreadTestRule
+            .getHandler()
+            .postAndSync(
+                () -> {
+                  ExoPlayer exoPlayer = new TestExoPlayerBuilder(context).build();
+                  exoPlayer.setMediaItems(ImmutableList.of(mediaItem, mediaItem));
+                  return exoPlayer;
+                });
+    List<MediaItem> currentMediaItemsOfPlayer = new ArrayList<>();
+    AtomicReference<MediaController> activeController = new AtomicReference<>();
+    List<String> activeControllerEvents = new ArrayList<>();
+    CountDownLatch latch = new CountDownLatch(5);
+    List<String> passiveControllerEvents = new ArrayList<>();
+    // Listener added to player before the session is built and the session adds a listener.
+    testPlayer.addListener(
+        new Player.Listener() {
+          @Override
+          public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
+            currentMediaItemsOfPlayer.add(testPlayer.getCurrentMediaItem());
+            postToController(
+                () -> {
+                  activeControllerEvents.add("player.onMediaItemTransition");
+                  passiveControllerEvents.add("player.onMediaItemTransition");
+                  latch.countDown();
+                });
+          }
+
+          @Override
+          public void onEvents(Player player, Player.Events events) {
+            if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
+              // Player still has the first item. Command has not yet arrived at the session.
+              currentMediaItemsOfPlayer.add(testPlayer.getCurrentMediaItem());
+              postToController(
+                  () -> {
+                    activeControllerEvents.add("player.onEvents");
+                    passiveControllerEvents.add("player.onEvents");
+                    latch.countDown();
+                  });
+            }
+          }
+        });
+    MediaSession session =
+        sessionTestRule.ensureReleaseAfterTest(
+            new MediaSession.Builder(context, testPlayer)
+                .setId(
+                    "listener_controllerListenerTriggeredByMasking_commandNotYetArrivedAtSession")
+                .build());
+    MediaController passiveController = controllerTestRule.createController(session.getToken());
+    passiveController.addListener(
+        new Listener() {
+
+          @Override
+          public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
+            passiveControllerEvents.add("controller.onMediaItemTransition");
+            latch.countDown();
+          }
+
+          @Override
+          public void onEvents(Player player, Events events) {
+            if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
+              passiveControllerEvents.add("controller.onEvents");
+              latch.countDown();
+            }
+          }
+        });
+    activeController.set(controllerTestRule.createController(session.getToken()));
+    activeController
+        .get()
+        .addListener(
+            /* listener= */ new Player.Listener() {
+              @Override
+              public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
+                activeControllerEvents.add("controller.onMediaItemTransition");
+                postToPlayer(() -> currentMediaItemsOfPlayer.add(testPlayer.getCurrentMediaItem()));
+              }
+
+              @Override
+              public void onEvents(Player player, Player.Events events) {
+                if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
+                  // Triggered by masking in the same looper iteration as where
+                  // controller.seekToNextMediaItem() is called.
+                  activeControllerEvents.add("controller.onEvents");
+                  postToPlayer(
+                      () -> {
+                        currentMediaItemsOfPlayer.add(testPlayer.getCurrentMediaItem());
+                        latch.countDown();
+                      });
+                }
+              }
+            });
+
+    postToControllerAndSync(activeController.get()::seekToNextMediaItem);
+
+    assertThat(latch.await(TIMEOUT_MS, MILLISECONDS)).isTrue();
+    // controller event first for the controller that initiates the state change (masking)
+    assertThat(activeControllerEvents.get(0)).isEqualTo("controller.onMediaItemTransition");
+    assertThat(activeControllerEvents)
+        .containsExactly(
+            "controller.onMediaItemTransition",
+            "controller.onEvents",
+            "player.onMediaItemTransition",
+            "player.onEvents");
+    // player events first for controllers just receiving the state change
+    assertThat(passiveControllerEvents.get(0)).isEqualTo("player.onMediaItemTransition");
+    assertThat(passiveControllerEvents)
+        .containsExactly(
+            "player.onMediaItemTransition",
+            "player.onEvents",
+            "controller.onMediaItemTransition",
+            "controller.onEvents");
+    assertThat(currentMediaItemsOfPlayer)
+        .containsExactly(mediaItem, mediaItem, mediaItem, mediaItem)
         .inOrder();
+    postToControllerAndSync(() -> activeController.get().release());
   }
 
   @Test
@@ -1761,10 +2025,10 @@ public class MediaSessionCallbackTest {
         new MediaSession.Callback() {
           @Override
           public ListenableFuture<MediaSession.MediaItemsWithStartPosition> onPlaybackResumption(
-              MediaSession mediaSession, ControllerInfo controller) {
-            return Futures.immediateFuture(
+              MediaSession mediaSession, ControllerInfo controller, boolean isForPlayback) {
+            return immediateFuture(
                 new MediaSession.MediaItemsWithStartPosition(
-                    MediaTestUtils.createMediaItems(2),
+                    MediaTestUtils.createMediaItems(/* size= */ 2, /* buildWithUri= */ true),
                     /* startIndex= */ 1,
                     /* startPositionMs= */ 123L));
           }
@@ -1791,6 +2055,14 @@ public class MediaSessionCallbackTest {
     assertThat(player.hasMethodBeenCalled(MockPlayer.METHOD_PLAY)).isTrue();
     assertThat(onPlayerInteractionFinishedCommands.get())
         .isEqualTo(new Player.Commands.Builder().add(COMMAND_PLAY_PAUSE).build());
+  }
+
+  private void postToPlayer(Runnable r) {
+    playerThreadTestRule.getHandler().post(r);
+  }
+
+  private void postToController(Runnable r) {
+    controllerThreadTestRule.getHandler().post(r);
   }
 
   private void postToPlayerAndSync(TestHandler.TestRunnable r) {

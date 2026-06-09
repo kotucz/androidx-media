@@ -15,11 +15,11 @@
  */
 package androidx.media3.test.utils;
 
-import static androidx.media3.common.util.Assertions.checkArgument;
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
 import static androidx.media3.test.utils.FakeSampleStream.FakeSampleStreamItem.END_OF_STREAM_ITEM;
 import static androidx.media3.test.utils.FakeSampleStream.FakeSampleStreamItem.oneByteSample;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.truth.Truth.assertThat;
 import static java.lang.Math.min;
 
@@ -99,7 +99,9 @@ public class FakeMediaPeriod implements MediaPeriod {
         long initialSampleTimeUs, float sampleRate, long durationUs, int keyFrameInterval) {
       return (unusedFormat, unusedMediaPeriodId) -> {
         ImmutableList.Builder<FakeSampleStreamItem> samples = ImmutableList.builder();
-        for (int frameIndex = 0; frameIndex < durationUs / 33_333; frameIndex++) {
+        long frameCount =
+            DoubleMath.roundToLong(durationUs * sampleRate / C.MICROS_PER_SECOND, RoundingMode.UP);
+        for (int frameIndex = 0; frameIndex < frameCount; frameIndex++) {
           long frameTimeUs =
               initialSampleTimeUs
                   + DoubleMath.roundToLong(
@@ -129,7 +131,8 @@ public class FakeMediaPeriod implements MediaPeriod {
   private boolean deferOnPrepared;
   private boolean prepared;
   private long seekOffsetUs;
-  private long discontinuityPositionUs;
+  private long pendingDiscontinuityUs;
+  private boolean usesStreamPrerollFlags;
   private long lastSeekPositionUs;
 
   /**
@@ -258,7 +261,7 @@ public class FakeMediaPeriod implements MediaPeriod {
     this.drmSessionManager = drmSessionManager;
     this.drmEventDispatcher = drmEventDispatcher;
     sampleStreams = Sets.newIdentityHashSet();
-    discontinuityPositionUs = C.TIME_UNSET;
+    pendingDiscontinuityUs = C.TIME_UNSET;
     fakePreparationLoadTaskId = LoadEventInfo.getNewId();
   }
 
@@ -269,7 +272,7 @@ public class FakeMediaPeriod implements MediaPeriod {
    * @param discontinuityPositionUs The position to be returned, in microseconds.
    */
   public void setDiscontinuityPositionUs(long discontinuityPositionUs) {
-    this.discontinuityPositionUs = discontinuityPositionUs;
+    this.pendingDiscontinuityUs = discontinuityPositionUs;
   }
 
   /** Allows the fake media period to complete preparation. May be called on any thread. */
@@ -364,10 +367,16 @@ public class FakeMediaPeriod implements MediaPeriod {
                 drmEventDispatcher,
                 selection.getSelectedFormat(),
                 sampleStreamItems);
+        if (pendingDiscontinuityUs != C.TIME_UNSET) {
+          sampleStream.setFlags(SampleStream.FLAG_HAS_PREROLL);
+        }
         sampleStreams.add(sampleStream);
         streams[i] = sampleStream;
         streamResetFlags[i] = true;
       }
+    }
+    if (usesStreamPrerollFlags) {
+      pendingDiscontinuityUs = C.TIME_UNSET;
     }
     return seekToUs(positionUs);
   }
@@ -385,10 +394,15 @@ public class FakeMediaPeriod implements MediaPeriod {
   }
 
   @Override
+  public void setUsesStreamPrerollFlags() {
+    this.usesStreamPrerollFlags = true;
+  }
+
+  @Override
   public long readDiscontinuity() {
     assertThat(prepared).isTrue();
-    long positionDiscontinuityUs = this.discontinuityPositionUs;
-    this.discontinuityPositionUs = C.TIME_UNSET;
+    long positionDiscontinuityUs = this.pendingDiscontinuityUs;
+    this.pendingDiscontinuityUs = C.TIME_UNSET;
     return positionDiscontinuityUs;
   }
 
@@ -414,7 +428,7 @@ public class FakeMediaPeriod implements MediaPeriod {
     boolean seekedInsideStreams = true;
     for (FakeSampleStream sampleStream : sampleStreams) {
       seekedInsideStreams &=
-          sampleStream.seekToUs(seekPositionUs, /* allowTimeBeyondBuffer= */ false);
+          sampleStream.seekToUs(seekPositionUs, /* allowTimeBeyondBuffer= */ isLoadingFinished());
     }
     if (!seekedInsideStreams) {
       for (FakeSampleStream sampleStream : sampleStreams) {
@@ -436,11 +450,9 @@ public class FakeMediaPeriod implements MediaPeriod {
               syncSampleTimestampsUs, positionUs, /* inclusive= */ true, /* stayInBounds= */ false);
       checkState(
           firstSyncTimestampIndex >= 0,
-          "Seek positionUs ("
-              + positionUs
-              + ") is smaller than first sync sample timestamp ("
-              + syncSampleTimestampsUs[0]
-              + ")");
+          "Seek positionUs (%s) is smaller than first sync sample timestamp (%s)",
+          positionUs,
+          syncSampleTimestampsUs[0]);
       long firstSyncUs = syncSampleTimestampsUs[firstSyncTimestampIndex];
       long secondSyncUs =
           firstSyncTimestampIndex < syncSampleTimestampsUs.length - 1

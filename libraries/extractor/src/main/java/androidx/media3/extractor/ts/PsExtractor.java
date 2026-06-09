@@ -15,12 +15,13 @@
  */
 package androidx.media3.extractor.ts;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import android.util.SparseArray;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.ParsableBitArray;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.common.util.TimestampAdjuster;
@@ -173,7 +174,8 @@ public final class PsExtractor implements Extractor {
 
   @Override
   public int read(ExtractorInput input, PositionHolder seekPosition) throws IOException {
-    Assertions.checkStateNotNull(output); // Asserts init has been called.
+    // Asserts init has been called.
+    checkNotNull(output);
 
     long inputLength = input.getLength();
     boolean canReadDuration = inputLength != C.LENGTH_UNSET;
@@ -189,16 +191,19 @@ public final class PsExtractor implements Extractor {
     long peekBytesLeft =
         inputLength != C.LENGTH_UNSET ? inputLength - input.getPeekPosition() : C.LENGTH_UNSET;
     if (peekBytesLeft != C.LENGTH_UNSET && peekBytesLeft < 4) {
+      onEndOfInput();
       return RESULT_END_OF_INPUT;
     }
     // First peek and check what type of start code is next.
     if (!input.peekFully(psPacketBuffer.getData(), 0, 4, true)) {
+      onEndOfInput();
       return RESULT_END_OF_INPUT;
     }
 
     psPacketBuffer.setPosition(0);
     int nextStartCode = psPacketBuffer.readInt();
     if (nextStartCode == MPEG_PROGRAM_END_CODE) {
+      onEndOfInput();
       return RESULT_END_OF_INPUT;
     } else if (nextStartCode == PACK_START_CODE) {
       // Now peek the rest of the pack_header.
@@ -292,6 +297,12 @@ public final class PsExtractor implements Extractor {
 
   // Internals.
 
+  private void onEndOfInput() {
+    for (int i = 0; i < psPayloadReaders.size(); i++) {
+      psPayloadReaders.valueAt(i).consumeEndOfInput();
+    }
+  }
+
   @RequiresNonNull("output")
   private void maybeOutputSeekMap(long inputLength) {
     if (!hasOutputSeekMap) {
@@ -358,7 +369,11 @@ public final class PsExtractor implements Extractor {
       pesPayloadReader.packetStarted(timeUs, TsPayloadReader.FLAG_DATA_ALIGNMENT_INDICATOR);
       pesPayloadReader.consume(data);
       // We always have complete PES packets with program stream.
-      pesPayloadReader.packetFinished(/* isEndOfInput= */ false);
+      pesPayloadReader.packetFinished();
+    }
+
+    private void consumeEndOfInput() {
+      pesPayloadReader.endOfInputReached();
     }
 
     private void parseHeader() {

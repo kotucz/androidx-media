@@ -15,9 +15,10 @@
  */
 package androidx.media3.test.utils;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
 import static androidx.media3.common.util.Util.castNonNull;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.truth.Truth.assertThat;
 
 import android.os.Handler;
@@ -30,7 +31,6 @@ import androidx.media3.common.MediaItem;
 import androidx.media3.common.Timeline;
 import androidx.media3.common.Timeline.Period;
 import androidx.media3.common.TrackGroup;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.datasource.DataSpec;
@@ -38,6 +38,7 @@ import androidx.media3.datasource.TransferListener;
 import androidx.media3.exoplayer.drm.DrmSessionEventListener;
 import androidx.media3.exoplayer.drm.DrmSessionManager;
 import androidx.media3.exoplayer.source.BaseMediaSource;
+import androidx.media3.exoplayer.source.ClippingMediaPeriod;
 import androidx.media3.exoplayer.source.ForwardingTimeline;
 import androidx.media3.exoplayer.source.LoadEventInfo;
 import androidx.media3.exoplayer.source.MediaLoadData;
@@ -338,7 +339,7 @@ public class FakeMediaSource extends BaseMediaSource {
     if (timeline == null) {
       return;
     }
-    timeline = new TimelineWithUpdatedMediaItem(timeline, mediaItem);
+    timeline = TimelineWithUpdatedMediaItem.create(timeline, mediaItem);
     if (preparedSource && preparationAllowed) {
       refreshSourceInfo(timeline);
     }
@@ -382,12 +383,16 @@ public class FakeMediaSource extends BaseMediaSource {
     assertThat(preparedSource).isTrue();
     assertThat(releasedSource).isFalse();
     int periodIndex = castNonNull(timeline).getIndexOfPeriod(id.periodUid);
-    Assertions.checkArgument(periodIndex != C.INDEX_UNSET);
+    checkArgument(periodIndex != C.INDEX_UNSET);
     Period period = timeline.getPeriod(periodIndex, new Period());
     MediaSourceEventListener.EventDispatcher mediaSourceEventDispatcher =
         createEventDispatcher(period.windowIndex, id);
     DrmSessionEventListener.EventDispatcher drmEventDispatcher =
         createDrmEventDispatcher(period.windowIndex, id);
+    long nextAdGroupTimeUs =
+        id.nextAdGroupIndex != C.INDEX_UNSET
+            ? period.getAdGroupTimeUs(id.nextAdGroupIndex)
+            : C.TIME_UNSET;
     MediaPeriod mediaPeriod =
         createMediaPeriod(
             id,
@@ -397,6 +402,14 @@ public class FakeMediaSource extends BaseMediaSource {
             drmSessionManager,
             drmEventDispatcher,
             transferListener);
+    if (nextAdGroupTimeUs != C.TIME_UNSET) {
+      mediaPeriod =
+          new ClippingMediaPeriod(
+              mediaPeriod,
+              /* enableInitialDiscontinuity= */ true,
+              /* startUs= */ 0,
+              /* endUs= */ nextAdGroupTimeUs);
+    }
     activeMediaPeriods.add(mediaPeriod);
     createdMediaPeriods.add(id);
     return mediaPeriod;
@@ -548,7 +561,7 @@ public class FakeMediaSource extends BaseMediaSource {
   }
 
   private void finishSourcePreparation(boolean sendManifestLoadEvents) {
-    refreshSourceInfo(Assertions.checkStateNotNull(timeline));
+    refreshSourceInfo(checkNotNull(timeline));
     if (!timeline.isEmpty() && sendManifestLoadEvents) {
       MediaLoadData mediaLoadData =
           new MediaLoadData(

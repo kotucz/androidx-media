@@ -15,13 +15,14 @@
  */
 package androidx.media3.transformer.mh.analysis;
 
-import static androidx.media3.common.util.Assertions.checkState;
 import static androidx.test.platform.app.InstrumentationRegistry.getInstrumentation;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 
 import android.content.Context;
 import android.net.Uri;
 import android.view.SurfaceView;
+import androidx.annotation.RequiresApi;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.TrackSelectionParameters;
@@ -30,7 +31,7 @@ import androidx.media3.exoplayer.DecoderCounters;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.analytics.AnalyticsListener;
-import androidx.media3.transformer.AndroidTestUtil;
+import androidx.media3.test.utils.TestSummaryLogger;
 import androidx.media3.transformer.PlayerTestListener;
 import androidx.media3.transformer.SurfaceTestActivity;
 import androidx.test.core.app.ApplicationProvider;
@@ -38,6 +39,7 @@ import androidx.test.ext.junit.rules.ActivityScenarioRule;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicReference;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.json.JSONException;
@@ -78,6 +80,7 @@ public class ExoPlayerFrameDropAnalysisTest {
   public TestConfig testConfig;
 
   @Parameters(name = "{0}")
+  @RequiresApi(24)
   public static List<TestConfig> parameters() {
     return Sets.cartesianProduct(
             INPUT_ASSETS,
@@ -179,7 +182,7 @@ public class ExoPlayerFrameDropAnalysisTest {
     resultJson.put(
         "maxConsecutiveDroppedBufferCount", decoderCounters.get().maxConsecutiveDroppedBufferCount);
     resultJson.put("droppedToKeyframeCount", decoderCounters.get().droppedToKeyframeCount);
-    AndroidTestUtil.writeTestSummaryToFile(
+    TestSummaryLogger.writeTestSummaryToFile(
         ApplicationProvider.getApplicationContext(),
         /* testId= */ testName.getMethodName(),
         resultJson);
@@ -199,8 +202,11 @@ public class ExoPlayerFrameDropAnalysisTest {
     @Override
     public String toString() {
       return String.format(
+          Locale.US,
           "%s_sp_%f_lateUs_%d",
-          Uri.parse(uri).getLastPathSegment(), playbackSpeed, lateThresholdUs);
+          Uri.parse(uri).getLastPathSegment(),
+          playbackSpeed,
+          lateThresholdUs);
     }
 
     public JSONObject toJsonObject() throws JSONException {

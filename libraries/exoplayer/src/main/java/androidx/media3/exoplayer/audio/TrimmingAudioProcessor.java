@@ -16,9 +16,9 @@
 package androidx.media3.exoplayer.audio;
 
 import static androidx.media3.common.util.Util.isEncodingLinearPcm;
+import static java.lang.Math.max;
 import static java.lang.Math.min;
 
-import androidx.media3.common.Format;
 import androidx.media3.common.audio.BaseAudioProcessor;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
@@ -47,7 +47,7 @@ public final class TrimmingAudioProcessor extends BaseAudioProcessor {
    * processor. After calling this method, call {@link #configure(AudioFormat)} to apply the new
    * trimming frame counts.
    *
-   * <p>See {@link AudioSink#configure(Format, int, int[])}.
+   * <p>See {@link AudioSink#configure(androidx.media3.exoplayer.audio.AudioSink.AudioSinkConfig)}.
    *
    * @param trimStartFrames The number of audio frames to trim from the start of audio.
    * @param trimEndFrames The number of audio frames to trim from the end of audio.
@@ -72,9 +72,13 @@ public final class TrimmingAudioProcessor extends BaseAudioProcessor {
 
   @Override
   public long getDurationAfterProcessorApplied(long durationUs) {
-    return durationUs
-        - Util.sampleCountToDurationUs(
-            /* sampleCount= */ trimEndFrames + trimStartFrames, inputAudioFormat.sampleRate);
+    // TODO: b/369509881 - Use StreamMetadata#positionOffsetUs to calculate duration based on seek
+    //  position.
+    return max(
+        0,
+        durationUs
+            - Util.sampleCountToDurationUs(
+                /* sampleCount= */ trimEndFrames + trimStartFrames, inputAudioFormat.sampleRate));
   }
 
   @Override
@@ -165,7 +169,7 @@ public final class TrimmingAudioProcessor extends BaseAudioProcessor {
   }
 
   @Override
-  protected void onFlush() {
+  protected void onFlush(StreamMetadata streamMetadata) {
     if (reconfigurationPending) {
       // Flushing activates the new configuration, so prepare to trim bytes from the start/end.
       reconfigurationPending = false;

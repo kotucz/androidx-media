@@ -16,10 +16,9 @@
 package androidx.media3.exoplayer.drm;
 
 import static android.os.Build.VERSION.SDK_INT;
-import static androidx.media3.common.util.Assertions.checkArgument;
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.annotation.ElementType.TYPE_USE;
 
 import android.annotation.SuppressLint;
@@ -34,6 +33,7 @@ import androidx.media3.common.C;
 import androidx.media3.common.DrmInitData;
 import androidx.media3.common.DrmInitData.SchemeData;
 import androidx.media3.common.Format;
+import androidx.media3.common.MediaLibraryInfo;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.util.Log;
@@ -443,7 +443,7 @@ public class DefaultDrmSessionManager implements DrmSessionManager {
       @Nullable DrmSessionEventListener.EventDispatcher eventDispatcher, Format format) {
     // Don't verify the playback thread, preacquireSession can be called from any thread.
     checkState(prepareCallsCount > 0);
-    checkStateNotNull(playbackLooper);
+    checkNotNull(playbackLooper);
     PreacquiredSessionReference preacquiredSessionReference =
         new PreacquiredSessionReference(eventDispatcher);
     preacquiredSessionReference.acquire(format);
@@ -456,7 +456,7 @@ public class DefaultDrmSessionManager implements DrmSessionManager {
       @Nullable DrmSessionEventListener.EventDispatcher eventDispatcher, Format format) {
     verifyPlaybackThread(/* allowBeforeSetPlayer= */ false);
     checkState(prepareCallsCount > 0);
-    checkStateNotNull(playbackLooper);
+    checkNotNull(playbackLooper);
     return acquireSession(
         playbackLooper,
         eventDispatcher,
@@ -549,6 +549,7 @@ public class DefaultDrmSessionManager implements DrmSessionManager {
     ExoMediaDrm exoMediaDrm = checkNotNull(this.exoMediaDrm);
     boolean avoidPlaceholderDrmSessions =
         exoMediaDrm.getCryptoType() == C.CRYPTO_TYPE_FRAMEWORK
+            && MediaLibraryInfo.enableWorkarounds()
             && FrameworkCryptoConfig.WORKAROUND_DEVICE_NEEDS_KEYS_TO_CONFIGURE_CODEC;
     // Avoid attaching a session to sparse formats.
     if (avoidPlaceholderDrmSessions
